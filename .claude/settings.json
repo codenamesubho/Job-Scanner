@@ -1,0 +1,12 @@
+{
+  "advisorModel": "fable",
+  "tui": "fullscreen",
+  "theme": "dark-daltonized",
+  "sandbox": {
+    "enabled": true,
+    "filesystem": {
+      "denyRead": ["~/"],
+      "allowRead": ["."]
+    }
+  }
+}

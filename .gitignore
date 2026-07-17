@@ -1,0 +1,19 @@
+venv/
+venv.broken/
+.env
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+output/*.csv
+output/*.json
+data/jobs.db
+data/playwright_sessions/*.json
+project_progress.md
+
+# IDE
+.idea/
+
+# Claude Code config — keep settings.json (shared), ignore everything else
+.claude/*
+!.claude/settings.json

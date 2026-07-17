@@ -1,0 +1,16 @@
+python-jobspy
+pandas
+python-dotenv
+tabulate
+streamlit
+PyMuPDF
+pymupdf4llm
+python-docx
+instructor
+litellm
+langfuse
+fastapi
+playwright
+
+# dev / testing
+pytest
