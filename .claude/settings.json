@@ -5,7 +5,7 @@
   "sandbox": {
     "enabled": true,
     "filesystem": {
-      "denyRead": ["~/"],
+      "denyRead": ["~/", "/tmp/"],
       "allowRead": ["."]
     }
   }

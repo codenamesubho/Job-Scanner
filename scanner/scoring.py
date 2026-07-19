@@ -123,7 +123,7 @@ def score_unscored_jobs(log_fn=print, limit:Optional[int]=None) -> int:
         if resume_profile is None:
             return 0
 
-        pending = get_jobs(missing_structured_score=False)
+        pending = get_jobs(missing_structured_score=True)
         if "jd_extracted" not in pending.columns or pending.empty:
             log_fn("No jobs need structured scoring.")
             return 0
