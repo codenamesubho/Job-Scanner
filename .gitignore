@@ -10,6 +10,7 @@ output/*.json
 data/jobs.db
 data/playwright_sessions/*.json
 project_progress.md
+test_litellm_cliproxy_cache.py
 
 # IDE
 .idea/

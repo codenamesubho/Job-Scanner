@@ -481,19 +481,33 @@ def _score_structured_batch(resume_json: str, resume: dict, batch: list[dict], l
             try:
                 return client.chat.completions.create(
                     model=model,
-                    # TEMP DIAGNOSTIC: system+user merged into a single user
-                    # message (no separate system message) while investigating
-                    # whether CLIProxyAPI is dropping the system message on
-                    # some calls — production rows showed skills judgments
-                    # ("no candidate data") ignoring resume_profile (system-
-                    # only) while company/remote/role judgments correctly used
-                    # job_requirements (user-only), consistent with the system
-                    # message specifically going missing on those calls.
-                    # Prompt caching disabled too since cache_control currently
-                    # only targets the system message. Revert both once this
-                    # diagnostic is resolved.
+                    # Confirmed root cause of the diagnostic below: CLIProxyAPI
+                    # (the Anthropic backend behind api_base, see
+                    # _PROVIDER_CONFIG) silently drops/overrides the `system`
+                    # field — reproduced with an unmistakable system-only
+                    # instruction sent both through litellm and via a raw HTTP
+                    # POST straight to CLIProxyAPI's /v1/messages, bypassing
+                    # litellm/instructor entirely: the model's response showed
+                    # no sign of the instruction either way, while replies
+                    # consistently self-identified as "Claude Code" regardless
+                    # of `system` content, consistent with CLIProxyAPI bridging
+                    # an actual Claude Code/subscription session that applies
+                    # its own fixed system prompt instead. `messages` content
+                    # came through faithfully in every test, so the rubric +
+                    # resume JSON now rides as its own leading `user` turn
+                    # (not merged into one string with user_prompt) — Anthropic's
+                    # API merges consecutive same-role messages into one turn,
+                    # and cache_control on its own content block caches it
+                    # exactly like a cached system message would, restoring the
+                    # caching this diagnostic had disabled.
                     messages=[
-                        {"role": "user", "content": system_prompt + "\n\n" + user_prompt},
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}
+                            ],
+                        },
+                        {"role": "user", "content": user_prompt},
                     ],
                     response_model=StructuredBatchScoreResult,
                     max_tokens=max_tokens,
