@@ -99,6 +99,8 @@ def render_jobs_tab(keywords: str, location: str, results: int, hours: int,
         jobs = jobs[jobs["is_remote"] == 1]
     if "score" in jobs.columns:
         jobs = jobs[jobs["score"].isna() | (jobs["score"] >= min_score)]
+    if "structured_score" in jobs.columns:
+        jobs = jobs.sort_values("structured_score", ascending=False, na_position="last")
 
     jobs_reset, selected_rows = _render_jobs_table(jobs)
 
