@@ -784,7 +784,12 @@ def search_jobs(
     seen_ids: set[str]   = set()
     pages_done = 0
 
-    with ThreadPoolExecutor(max_workers=num_pages) as pool:
+    # Not a `with` block on purpose: exiting `with ThreadPoolExecutor()` calls
+    # shutdown(wait=True), which blocks a KeyboardInterrupt/exception unwind
+    # until every in-flight page scrape finishes — see the same pattern (and
+    # rationale) in scanner/llm/raw_scoring.py's batch-scoring pool.
+    pool = ThreadPoolExecutor(max_workers=num_pages)
+    try:
         futures = {
             pool.submit(_scrape_one_page, pn, keywords, location, seconds): pn
             for pn in range(num_pages)
@@ -806,6 +811,8 @@ def search_jobs(
                 _log(f"Page {pn} FAILED: {exc}")
             if on_page_done:
                 on_page_done(pages_done, num_pages, len(all_rows))
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 
     with sync_playwright() as p:
         browser, context = _launch(p)

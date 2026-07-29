@@ -27,9 +27,13 @@ def _auto_score_new() -> None:
     previous scan, so only genuinely new jobs reach the LLM.
 
     Under SCORING_MODE=structured, extracts any missing structured JD/resume
-    JSON first (blocking — see extract_missing_job_requirements), then scores
-    against structured_score instead of score (see scanner.scoring.score_unscored_jobs
-    for the same two-mode logic used by the CLI/cron path).
+    JSON first, then scores against structured_score instead of score (see
+    scanner.scoring.score_unscored_jobs for the same two-mode logic used by
+    the CLI/cron path). Extraction, resume-profile loading, and job discovery
+    all run inside the same background daemon thread as the actual scoring
+    (rather than blocking the Streamlit script-runner thread beforehand) so
+    their progress reaches the log box and the UI stays responsive while a
+    large batch of new jobs is extracted one at a time.
     """
     cand_data = get_candidate()
     if not cand_data.get("summary"):
@@ -45,59 +49,6 @@ def _auto_score_new() -> None:
         return
 
     structured = scoring_mode() == "structured"
-    resume_profile = None
-
-    if structured:
-        st.caption("Extracting structured JD data for jobs missing it…")
-        extract_missing_job_requirements(log_fn=lambda msg: None)
-        resume_profile = load_resume_profile(cand_data, log_fn=lambda msg: None)
-        if resume_profile is None:
-            st.caption("Structured scoring skipped — could not load a structured resume profile.")
-            return
-
-        st.caption("Phase 2/3: checking for jobs missing a structured score…")
-        pending = get_jobs(missing_structured_score=True)
-        if "jd_extracted" not in pending.columns or pending.empty:
-            st.caption("No jobs need structured scoring.")
-            return
-        scoreable = scoreable_jobs(pending)
-        if scoreable.empty:
-            st.caption("No jobs need structured scoring.")
-            return
-        jobs_list = []
-        for _, row in scoreable.iterrows():
-            requirements = parse_jd_extracted(row.get("jd_extracted"))
-            if requirements is not None:
-                jobs_list.append({
-                    "id": row["id"], "requirements": requirements,
-                    "is_remote": bool(row.get("is_remote")),
-                    "title": row.get("title", ""), "company": row.get("company", ""),
-                })
-        if not jobs_list:
-            st.caption("No jobs have structured JD data to score against yet.")
-            return
-        total = len(jobs_list)
-        st.caption(f"{total} new job(s) need structured scoring.")
-    else:
-        st.caption("Phase 2/3: checking for already-scored jobs…")
-        unscored = get_jobs(unscored_only=True)
-        if "description" not in unscored.columns or unscored.empty:
-            st.caption("No new jobs need scoring.")
-            return
-
-        scoreable     = scoreable_jobs(unscored)
-        no_desc_count = len(unscored) - len(scoreable)
-        if scoreable.empty:
-            msg = "No new jobs need scoring."
-            if no_desc_count:
-                msg += f" ({no_desc_count} new job(s) have no description to score.)"
-            st.caption(msg)
-            return
-
-        jobs_list  = scoreable[["id", "title", "company", "description", "is_remote"]].to_dict("records")
-        total      = len(jobs_list)
-        skip_note  = f" ({no_desc_count} skipped — no description)" if no_desc_count else ""
-        st.caption(f"{total} new job(s) need scoring{skip_note}.")
 
     # score_jobs()/score_jobs_structured() run multiple batches concurrently,
     # each with its own heartbeat sub-thread logging "still running…" — so
@@ -105,7 +56,7 @@ def _auto_score_new() -> None:
     # main thread ever touching the log_box/progress widgets (same pattern
     # as handle_scan_all).
     state_lock = threading.Lock()
-    state = {"log": [], "scored": 0, "done": False, "error": None}
+    state = {"log": [], "scored": 0, "total": 0, "done": False, "error": None, "skip": None}
 
     def _log_fn(msg: str) -> None:
         with state_lock:
@@ -113,12 +64,61 @@ def _auto_score_new() -> None:
 
     def _worker() -> None:
         try:
+            resume_profile = None
             if structured:
+                _log_fn("Extracting structured JD data for jobs missing it…")
+                extract_missing_job_requirements(log_fn=_log_fn)
+                resume_profile = load_resume_profile(cand_data, log_fn=_log_fn)
+                if resume_profile is None:
+                    with state_lock:
+                        state["skip"] = "Structured scoring skipped — could not load a structured resume profile."
+                    return
+
+                _log_fn("Checking for jobs missing a structured score…")
+                pending = get_jobs(missing_structured_score=True)
+                if "jd_extracted" not in pending.columns or pending.empty:
+                    with state_lock:
+                        state["skip"] = "No jobs need structured scoring."
+                    return
+                scoreable = scoreable_jobs(pending)
+                if scoreable.empty:
+                    with state_lock:
+                        state["skip"] = "No jobs need structured scoring."
+                    return
+                jobs_list = []
+                for _, row in scoreable.iterrows():
+                    requirements = parse_jd_extracted(row.get("jd_extracted"))
+                    if requirements is not None:
+                        jobs_list.append({
+                            "id": row["id"], "requirements": requirements,
+                            "is_remote": bool(row.get("is_remote")),
+                            "title": row.get("title", ""), "company": row.get("company", ""),
+                        })
+                if not jobs_list:
+                    with state_lock:
+                        state["skip"] = "No jobs have structured JD data to score against yet."
+                    return
+                with state_lock:
+                    state["total"] = len(jobs_list)
                 score_iter = score_jobs_structured(resume_profile, jobs_list, log_fn=_log_fn)
                 update_fn = update_structured_scores
             else:
+                unscored = get_jobs(unscored_only=True)
+                if "description" not in unscored.columns or unscored.empty:
+                    with state_lock:
+                        state["skip"] = "No new jobs need scoring."
+                    return
+                scoreable = scoreable_jobs(unscored)
+                if scoreable.empty:
+                    with state_lock:
+                        state["skip"] = "No new jobs need scoring."
+                    return
+                jobs_list = scoreable[["id", "title", "company", "description", "is_remote"]].to_dict("records")
+                with state_lock:
+                    state["total"] = len(jobs_list)
                 score_iter = score_jobs(cand_data["summary"], jobs_list, log_fn=_log_fn)
                 update_fn = update_scores
+
             for result in score_iter:
                 if result:
                     update_fn(result)
@@ -134,25 +134,30 @@ def _auto_score_new() -> None:
     thread = threading.Thread(target=_worker, daemon=True)
     thread.start()
 
-    progress = st.progress(0, text=f"Scoring 0 / {total} job(s)…")
+    progress = st.progress(0, text="Checking for jobs to score…")
     log_box  = st.empty()
 
     while thread.is_alive():
         with state_lock:
             scored = state["scored"]
+            total  = state["total"]
             lines  = list(state["log"][-AUTO_SCORE_LOG_TAIL_LINES:])
-        progress.progress(min(scored / total, 1.0), text=f"Scoring {scored} / {total} job(s)…")
+        if total:
+            progress.progress(min(scored / total, 1.0), text=f"Scoring {scored} / {total} job(s)…")
         log_box.code("\n".join(lines))
         time.sleep(POLL_INTERVAL_S)
 
     with state_lock:
         scored = state["scored"]
         error  = state["error"]
+        skip   = state["skip"]
 
     progress.empty()
     log_box.empty()
     if error:
         st.warning(f"Scoring failed: {error}")
+    elif skip:
+        st.caption(skip)
     else:
         st.info(f"Scored {scored} new job(s).")
 
@@ -187,42 +192,10 @@ def _render_score_button() -> None:
             return
 
         structured = scoring_mode() == "structured"
-        resume_profile = None
-
-        if structured:
-            extract_missing_job_requirements(log_fn=lambda msg: None)
-            resume_profile = load_resume_profile(cand, log_fn=lambda msg: None)
-            if resume_profile is None:
-                st.info("Structured scoring skipped — could not load a structured resume profile.")
-                return
-            pending = get_jobs(missing_structured_score=True)
-            scoreable = scoreable_jobs(pending) if "jd_extracted" in pending.columns else pending.iloc[0:0]
-            if scoreable.empty:
-                st.info("No jobs need structured scoring.")
-                return
-            jobs_list = []
-            for _, row in scoreable.iterrows():
-                requirements = parse_jd_extracted(row.get("jd_extracted"))
-                if requirements is not None:
-                    jobs_list.append({
-                        "id": row["id"], "requirements": requirements,
-                        "is_remote": bool(row.get("is_remote")),
-                        "title": row.get("title", ""), "company": row.get("company", ""),
-                    })
-            if not jobs_list:
-                st.info("No jobs have structured JD data to score against yet.")
-                return
-        else:
-            all_jobs  = get_jobs()
-            scoreable = scoreable_jobs(all_jobs)
-            if scoreable.empty:
-                st.info("No jobs with descriptions to score.")
-                return
-            jobs_list = scoreable[["id", "title", "company", "description", "is_remote"]].to_dict("records")
 
         cancel_event = threading.Event()
         state_lock   = threading.Lock()
-        state = {"log": [], "scored": 0, "done": False, "error": None}
+        state = {"log": [], "scored": 0, "total": 0, "done": False, "error": None, "skip": None}
 
         def _log_fn(msg: str) -> None:
             with state_lock:
@@ -230,12 +203,52 @@ def _render_score_button() -> None:
 
         def _worker() -> None:
             try:
+                resume_profile = None
                 if structured:
+                    extract_missing_job_requirements(log_fn=_log_fn, cancel_event=cancel_event)
+                    if cancel_event.is_set():
+                        return
+                    resume_profile = load_resume_profile(cand, log_fn=_log_fn)
+                    if resume_profile is None:
+                        with state_lock:
+                            state["skip"] = "Structured scoring skipped — could not load a structured resume profile."
+                        return
+                    pending = get_jobs(missing_structured_score=True)
+                    scoreable = scoreable_jobs(pending) if "jd_extracted" in pending.columns else pending.iloc[0:0]
+                    if scoreable.empty:
+                        with state_lock:
+                            state["skip"] = "No jobs need structured scoring."
+                        return
+                    jobs_list = []
+                    for _, row in scoreable.iterrows():
+                        requirements = parse_jd_extracted(row.get("jd_extracted"))
+                        if requirements is not None:
+                            jobs_list.append({
+                                "id": row["id"], "requirements": requirements,
+                                "is_remote": bool(row.get("is_remote")),
+                                "title": row.get("title", ""), "company": row.get("company", ""),
+                            })
+                    if not jobs_list:
+                        with state_lock:
+                            state["skip"] = "No jobs have structured JD data to score against yet."
+                        return
+                    with state_lock:
+                        state["total"] = len(jobs_list)
                     score_iter = score_jobs_structured(resume_profile, jobs_list, log_fn=_log_fn, cancel_event=cancel_event)
                     update_fn = update_structured_scores
                 else:
+                    all_jobs  = get_jobs()
+                    scoreable = scoreable_jobs(all_jobs)
+                    if scoreable.empty:
+                        with state_lock:
+                            state["skip"] = "No jobs with descriptions to score."
+                        return
+                    jobs_list = scoreable[["id", "title", "company", "description", "is_remote"]].to_dict("records")
+                    with state_lock:
+                        state["total"] = len(jobs_list)
                     score_iter = score_jobs(summary, jobs_list, log_fn=_log_fn, cancel_event=cancel_event)
                     update_fn = update_scores
+
                 for result in score_iter:
                     if result:
                         update_fn(result)
@@ -251,8 +264,7 @@ def _render_score_button() -> None:
         thread = threading.Thread(target=_worker, daemon=True)
         thread.start()
         st.session_state["_score_job"] = {
-            "thread": thread, "cancel_event": cancel_event, "lock": state_lock,
-            "state": state, "total": len(jobs_list),
+            "thread": thread, "cancel_event": cancel_event, "lock": state_lock, "state": state,
         }
         st.rerun()
         return
@@ -263,19 +275,25 @@ def _render_score_button() -> None:
 
     with job["lock"]:
         scored = job["state"]["scored"]
+        total  = job["state"]["total"]
         lines  = list(job["state"]["log"][-LOG_TAIL_LINES:])
         done   = job["state"]["done"]
         error  = job["state"]["error"]
-    total     = job["total"]
+        skip   = job["state"]["skip"]
     cancelled = job["cancel_event"].is_set()
 
-    st.progress(min(scored / total, 1.0) if total else 1.0, text=f"Scoring {scored} / {total} job(s)…")
+    if total:
+        st.progress(min(scored / total, 1.0), text=f"Scoring {scored} / {total} job(s)…")
+    else:
+        st.progress(0, text="Extracting structured JD data…" if not done else "Done.")
     st.code("\n".join(lines))
 
     if done:
         del st.session_state["_score_job"]
         if error:
             st.error(f"Scoring failed: {error}")
+        elif skip:
+            st.info(skip)
         elif cancelled:
             st.warning(f"Scoring cancelled — {scored} job(s) scored before stopping.")
         else:

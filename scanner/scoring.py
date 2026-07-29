@@ -7,6 +7,7 @@ against it with score_jobs_structured() instead of score_jobs().
 """
 
 import json
+import threading
 from typing import Optional
 
 from .database import (
@@ -21,7 +22,8 @@ from .profile import get_candidate, get_latest_resume, extract_text, save_candid
 
 
 def extract_missing_job_requirements(log_fn=print, limit: int | None = None,
-                                      force: bool = False) -> int:
+                                      force: bool = False,
+                                      cancel_event: threading.Event | None = None) -> int:
     """No-ops (returns 0) unless SCORING_MODE=structured. Populates
     jobs.jd_extracted for every scoreable job missing it — or, when
     `force=True`, re-extracts every scoreable job regardless of whether
@@ -31,7 +33,11 @@ def extract_missing_job_requirements(log_fn=print, limit: int | None = None,
     `COALESCE(score, -1) DESC, first_seen DESC`, so slicing the first
     `limit` rows after filtering is exactly "top N jobs by score" (jobs with
     no score yet sort after every scored one, newest-first among
-    themselves). Returns the number of jobs successfully extracted."""
+    themselves). Returns the number of jobs successfully extracted.
+
+    `cancel_event`, if given, is checked once per job (extraction is
+    one-job-at-a-time, unlike the scoring batch pools) — setting it stops
+    the run before starting the next job's extraction call."""
     if scoring_mode() != "structured":
         return 0
 
@@ -52,6 +58,9 @@ def extract_missing_job_requirements(log_fn=print, limit: int | None = None,
     log_fn(f"{verb} structured JD data for {total} job(s)…")
     extracted = 0
     for i, (_, row) in enumerate(targets.iterrows(), start=1):
+        if cancel_event is not None and cancel_event.is_set():
+            log_fn(f"Cancelled — stopped after {i - 1}/{total} job(s).")
+            break
         log_fn(f"[{i}/{total}] {verb} job {row['id']} ({row.get('title', '')})…")
         try:
             result = extract_job_requirements(row["description"], row.get("company"))
