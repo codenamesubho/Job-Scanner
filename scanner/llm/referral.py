@@ -9,7 +9,7 @@ _REFERRAL_PROMPT = (
     "concrete reason they're relevant, not a generic recap of the whole summary.\n"
     "2. An explicit, direct ask: request that the contact refer them for the role, or put in "
     "a good word / point them to the right person if a direct referral isn't possible.\n"
-    "Keep the whole message under 130 words, warm but professional. If a job URL is provided, "
+    "Keep the whole message under 250 words, warm but professional. If a job URL is provided, "
     "include it naturally near the ask. Output only the message text — no subject line, no "
     "greeting label, no sign-off placeholder like '[Your Name]'.\n\n"
     "Candidate summary: {summary}\n"
@@ -107,7 +107,7 @@ def draft_referral_message(candidate_summary: str, contact: dict, job: dict) -> 
     )
 
     def _query(client, model):
-        max_tokens = 300
+        max_tokens = 400  # comfortable headroom for a 250-word reply on Flash-Lite (no reasoning-token overhead)
         current_prompt = prompt
         for attempt in range(2):
             response = client.chat.completions.create(
@@ -133,15 +133,25 @@ def draft_referral_message(candidate_summary: str, contact: dict, job: dict) -> 
                 raise ValueError("Referral draft came back empty after retry.")
             return text  # best effort — degenerate/possibly-truncated, but non-empty
 
-    # Pinned to Gemini rather than the default provider: confirmed by a live
-    # call in this environment that the default (Claude via the local
-    # CLIProxyAPI proxy) currently 404s on the configured CLAUDE_MODEL, while
-    # Gemini is the path everything else (extraction, and scoring's fallback)
-    # already relies on successfully. Revisit this once Claude/CLIProxyAPI is
-    # confirmed healthy — there's no cost rationale for pinning a low-volume,
-    # quality-sensitive call like this one, unlike extract_job_requirements's
-    # deliberate Gemini pin.
-    return execute_with_breaker(_query, provider_override="gemini")
+    # Pinned to Gemini (confirmed live: the default Claude path via the local
+    # CLIProxyAPI proxy 404s on the configured CLAUDE_MODEL). Uses its own
+    # "referral" model tier — REQUIRES GEMINI_REFERRAL_MODEL=gemini-2.5-flash-
+    # lite in .env (a pinned version, not the gemini-flash-latest alias).
+    # Without that env var set, this silently falls back to GEMINI_MODEL
+    # (gemini-flash-latest) via _model_class_override, which is the exact
+    # model confirmed live to spend ~800 tokens/call on invisible internal
+    # "thinking" before writing anything visible — reproducing the original
+    # mid-sentence-truncation bug with NO error or warning. Flash-Lite does
+    # no such reasoning pass — confirmed live at 165-210 completion tokens
+    # for a complete, on-ask reply to the same prompt. If Claude is ever
+    # revisited here, use claude-sonnet-4-6 (confirmed working live), not
+    # Haiku (confirmed live to refuse the task, self-identifying as "Claude
+    # Code" — the same CLIProxyAPI persona-bridging issue documented in
+    # _query's messages= comment above) — and note _looks_like_an_ask()
+    # below is a keyword check, not a refusal detector: Haiku's refusal text
+    # contained "referral"/"reference the role" and would have passed it,
+    # shipping the refusal as a draft undetected.
+    return execute_with_breaker(_query, provider_override="gemini", model_class="referral")
 
 
 def _format_field_line(c: dict) -> str:

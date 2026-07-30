@@ -387,6 +387,7 @@ def _model(provider: str | None = None, model_override: str | None = None) -> st
 _MODEL_CLASS_ENV = {
     "extract":          {"claude": "CLAUDE_EXTRACT_MODEL", "gemini": "GEMINI_EXTRACT_MODEL"},
     "structured_score": {"claude": "CLAUDE_STRUCTURED_SCORE_MODEL", "gemini": "GEMINI_STRUCTURED_SCORE_MODEL"},
+    "referral":         {"claude": "CLAUDE_REFERRAL_MODEL", "gemini": "GEMINI_REFERRAL_MODEL"},
 }
 
 
