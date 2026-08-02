@@ -2,14 +2,11 @@ from instructor.core import IncompleteOutputException
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from . import execute_with_breaker, observe
+from ._prompt_loader import load_prompt_file
 
-_SUMMARY_PROMPT = (
-    "Based on the following resume text, write a concise professional summary "
-    "in first person. Highlight key skills, years of experience, "
-    "and career focus. Highlight my work domain, tech stack and the years I have spent working on them."
-    "Output only the summary text — no headings or labels.\n\n"
-    "Resume:\n{resume_text}"
-)
+# Prompt text lives in scanner/llm/prompts/extraction.json (versioned per entry).
+_PROMPTS = load_prompt_file("extraction")
+_SUMMARY_PROMPT = _PROMPTS["summary"]["template"]
 
 
 class JobRequirements(BaseModel):
@@ -223,30 +220,7 @@ def generate_summary(resume_text: str) -> str:
 
 _JD_EXTRACT_MAX_CHARS = 100000
 
-_JD_EXTRACT_PROMPT = """\
-Extract structured information from the following raw job description. Only use information \
-explicitly present in the text — leave a field null/empty if it isn't stated; do not guess or \
-infer facts not present.
-
-Also write `description`: a short synopsis (2-4 plain-prose sentences) covering only the role's \
-core expectations and day-to-day responsibilities — skip benefits, EEO statements, culture blurbs, \
-and other company boilerplate that isn't specific to what this person would actually do. Keep the \
-same length and tone regardless of how long, short, or differently formatted this particular \
-posting is, so descriptions read consistently across jobs from different sources.
-
-For `company_type`/`company_size`: most job descriptions don't state these explicitly. The \
-hiring company's name is given below as "Company". If you recognize this company from your own \
-general knowledge (e.g. well-known big tech, a large/well-funded startup or unicorn, a well-known \
-but smaller/early-stage startup), use that knowledge to fill company_type/company_size — the same \
-way an experienced recruiter would recognize a company by name — even though that knowledge isn't \
-in the JD text itself. Only leave these null if the company name is generic/unrecognizable and \
-the JD text also says nothing about company size/stage.
-
-Company: {company}
-
-Job Description:
-{description}
-"""
+_JD_EXTRACT_PROMPT = _PROMPTS["jd_extract"]["template"]
 
 
 @observe(name="extract_job_requirements")
@@ -283,40 +257,7 @@ def extract_job_requirements(description: str, company: str | None = None) -> Jo
                                 provider_override="gemini")
 
 
-_RESUME_EXTRACT_PROMPT = """\
-Extract structured candidate information from the following resume text. Only use information \
-explicitly present in the text — leave a field null/empty if it isn't stated; do not guess or \
-infer facts not present.
-
-The resume's header (its first few lines) is the primary source for full_name and current_title, \
-even when it has no labels like "Name:" — treat a standalone line at the very top, often in a \
-larger font or all-caps, as the name. A short line right after it (or next to it, or separated by \
-a pipe/dash from the name) is usually the current title/designation. If the header has no title, \
-fall back to the job title of the most recent (topmost, or marked "Present") entry in the work \
-experience section — don't leave current_title null just because it's absent from the header.
-
-For phone/email/linkedin/github, extract exactly as written (don't reformat). For each work \
-experience entry, generate one short summary in work_summary, PREFIXED with company, title, and \
-that role's date range exactly as written on the resume (e.g. "Acme Corp — Senior Backend \
-Engineer (Nov 2022 - Present): ..." or "(2019-2022): ..." if company/title aren't stated) — the \
-date range is required on every entry, since it's how a later comparison can tell whether a skill \
-was used recently or only in an old role. After the date-range prefix, cover whichever of the \
-technology/stack used, the architecture or system worked on (scale, design, service boundaries), \
-and the specific problem/challenge that role tackled the resume actually describes; don't invent \
-or pad with generic filler for whichever of those three isn't stated for that role.
-
-Duration matters as much as the words used, so read the work experience section's dated entries \
-(not just a standalone "Skills" list) to fill skill_years: for each skill/technology actually used \
-in a dated role, add up the years of the date range(s) where it was used (e.g. "used in a role \
-from 2019-2022" ≈ 3 years); if the same skill recurs in a later role, add that range too, but \
-don't double-count time from concurrent/overlapping roles. A skill only ever mentioned in a bare \
-skills list, with no traceable dated role behind it, still belongs in `skills` but should be left \
-out of skill_years rather than guessed at. This also feeds years_exp and seniority_band — base \
-those on the full span of dated work experience, not just the most recent role.
-
-Resume:
-{resume_text}
-"""
+_RESUME_EXTRACT_PROMPT = _PROMPTS["resume_extract"]["template"]
 
 
 @observe(name="extract_resume_profile")

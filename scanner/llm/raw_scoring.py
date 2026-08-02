@@ -11,133 +11,30 @@ from . import (
     BATCH_SIZE, BatchScoreResult, EmptyScoringResultError, _provider,
     _raw_completion_text, observe, scoring_breaker_status,
 )
+from ._prompt_loader import load_prompt_file
 
-_SCORE_RUBRIC = """\
-Scoring rubric — four categories per job, sub-scores MUST sum to that job's total score:
-- skills (0–60): how well the candidate's background fits the STATED requirements, weighing CORE
-  fit far more heavily than specific tool/framework overlap. Score only against explicitly listed
-  qualifications — these live in sections like "Basic Qualifications"/"Required"/"Preferred"/
-  "What you'll need", NOT in company mission/context narrative (e.g. a "we're building supply
-  chain tech" intro is marketing framing, not a requirement — do not treat it as one).
-    * CORE fit = the same overall engineering discipline/domain as the candidate's background
-      (backend/distributed-systems/platform engineering — NOT a fundamentally different
-      discipline like QA/test-automation, frontend-only, mobile-only, data-science/ML-research,
-      etc.) and a matching general architecture pattern (microservices, event-driven pipelines,
-      distributed data systems). This is what actually predicts whether someone can do the job.
-      Years-of-experience and seniority-level fit are judged separately (HARD GATE below, and the
-      role category) — do not fold them into CORE fit, or the same signal gets scored twice.
-    * PERIPHERAL/learnable = a specific named programming language, framework, cloud vendor,
-      observability tool, or similar tooling choice (e.g. Go vs Python, React vs Vue, Datadog vs
-      Prometheus, a specific AI-coding-assistant, a specific ORM). Most engineers pick these up
-      within weeks on the job once the core discipline/architecture already matches — companies
-      routinely hire for the core discipline and expect tooling gaps to be learned post-hire.
-      Missing several of these should cost meaningful but bounded points; never treat the job as
-      "not a match" on their absence alone.
-    * Domain-specific compliance/regulatory knowledge (HL7/FHIR/HIPAA, PCI, SOC2, etc.) sits
-      between the two — real but learnable-on-the-job unless the JD explicitly requires it as a
-      hard prerequisite.
-  Do NOT penalise for industry domain (fintech, payments, healthcare, supply chain, etc.) unless
-  a qualifications section explicitly requires that domain background. Give partial credit when
-  the stack/domain transfers (e.g. distributed systems at HR-tech → payments infrastructure).
-  If the JD does NOT name a specific tech stack/language at all (only responsibilities, scope, or
-  years), score assuming the company is okay with any stack — no stated stack means no bar to
-  fail, and usually signals the org isn't stack-picky, so a strong generalist background is a
-  good fit for it. Only reduce skills below what the stated (non-stack) requirements otherwise
-  earn when the JD explicitly names specific technologies/languages the candidate's background
-  doesn't show, and even then bound the reduction per PERIPHERAL guidance above.
-  Scoring bands (pick the band from CORE fit, then adjust within it for how many
-  peripheral/tooling requirements are missing):
-    * 40–60: core discipline and architecture pattern both match. Deduct within this band for
-      missing peripheral tooling/frameworks, but stay at 40+ as long as the core discipline match
-      holds — this is a legitimate strong candidate even with tooling gaps.
-    * 20–39: core discipline mostly matches but with real gaps — an adjacent-but-different
-      architecture pattern, or several peripheral gaps stacked together with a thin overall match.
-    * 0–19: reserved for an actual CORE mismatch — a different engineering discipline entirely.
-      Do not score this low just because several specific tools/frameworks aren't shown on the
-      resume (peripheral gap, not a core mismatch), and do not score it low for a years-of-
-      experience shortfall either — that's the HARD GATE's job below, not this band.
-  HARD GATE: first check whether the job states an explicit minimum years-of-experience (e.g.
-  "12+ years"). Compare it numerically against the candidate's own stated years of experience —
-  do not treat "10+ years" as satisfying a "12+ years" requirement just because both are
-  large numbers; if the candidate's years fall short of a stated minimum, this is a likely
-  automatic screen-out regardless of how well the tech stack matches: cap skills at 15/60 and
-  say so explicitly in the reason (name both numbers). If no minimum is stated, or the
-  candidate meets/exceeds it, score normally per the bands above.
-  The reason MUST justify the point loss, not just the match: name the specific requirements
-  that DO match, AND the specific stated requirements that are missing/weak that account for
-  why the score isn't higher, distinguishing core gaps from peripheral/learnable ones (e.g.
-  "Kafka/Python/AWS and core distributed-systems experience match; missing Go and Kubernetes as
-  specific tooling (learnable, minor deduction), no ML-infra domain experience stated — hence
-  44/60, not lower, since the core discipline fit holds"). A reason that only lists matches
-  without naming what's missing is incomplete — every gap large enough to cost more than ~5
-  points must be named.
-- company (0–10): big tech (Google, Meta, Apple, Microsoft, Amazon, Netflix, Uber, Airbnb,
-  Stripe, OpenAI, Anthropic, Salesforce, Nvidia, Visa, etc.) or a large/well-funded startup
-  (unicorn, late-stage, hundreds+ employees) = 10; well-known but smaller/early-stage startup
-  = 7; unknown = 0.
-- remote (0–10): fully remote = 10; hybrid = 5; on-site = 0.
-- role (0–20): how well the job's level matches the candidate's demonstrated CEILING of fit for
-  that company's scale — NOT a general scope/impact/growth score. The candidate has
-  consistently been hired at **Senior**-level at big tech/large well-funded startups, and at
-  **Staff**-level at smaller/early-stage startups (a smaller company gives more scope/impact
-  per level, so the achievable ceiling there is one level higher than at a big company). Use
-  the same company-scale judgment as the company category above. The key distinction is
-  ceiling vs. reach, NOT "exact sweet spot vs. anything else" — a title AT OR BELOW the
-  demonstrated ceiling is an equally strong, safe fit, not a downgrade:
-    * 15–20: title is AT OR BELOW the demonstrated ceiling for that company's scale. This
-      includes the exact sweet spot (Senior at big tech/large startup; Staff at a
-      smaller/early-stage startup) AND anything easier than that ceiling (e.g. Senior at a
-      smaller/early-stage startup is comfortably below its Staff ceiling — still a strong,
-      safe fit, score it here too, not lower).
-    * 6–12: company scale itself is ambiguous/borderline (e.g. mid-size, well-funded-but-not-
-      huge) so the applicable ceiling is unclear either way.
-    * 0–5: title clearly EXCEEDS the demonstrated ceiling for that company's scale — a real
-      reach with low odds (e.g. Staff/Principal/Senior Staff at big tech or a large/well-funded
-      startup, since the demonstrated ceiling there is Senior). This is not a scope/impact
-      bonus — score it low even though the role itself may look impressive.
-  Include a one-sentence reason naming both the title level and the company's scale."""
-
+# Prompt text lives in scanner/llm/prompts/raw_scoring.json (versioned per
+# entry), loaded once here into the same constant names this module always
+# used — everything below (.format() calls, _score_batch, _build_batches)
+# is unaffected by prompt text living in JSON instead of inline strings.
+#
 # One LLM call scores every job packed into it (see _build_batches) rather
 # than one call per job — the response is a JSON array, one entry per job,
 # matched back by the "id" copied verbatim from each job block below. That
 # id is a short, ephemeral hash-derived label (_batch_short_id), not the
 # job's real database id — see _score_batch's id_map for why.
 #
-# Split into a system part (rubric + candidate profile — identical across
-# every batch call in a scoring run) and a user part (job data + response
-# format — different per batch) so the system part can be prompt-cached via
-# litellm's cache_control_injection_points (see _score_batch) instead of
-# resending ~1,800 tokens of static rubric text on every single batch call.
-_BATCH_SCORE_SYSTEM_PROMPT = """\
-You are a recruiter scoring job matches for a candidate against MULTIPLE jobs in a single pass. \
-Score EVERY job listed below independently, 0–100 each.
-
-{rubric}
-
-Candidate Profile:
-{summary}"""
-
-_BATCH_SCORE_USER_PROMPT = """\
-There are {n} job(s) below, each starting with "--- Job id=<id> ---". Score every one of them — \
-do not skip any and do not invent jobs that aren't listed.
-
-{jobs_block}
-
-IMPORTANT: Respond with ONLY a JSON object — no markdown, no prose, no explanation — of exactly \
-this form, with one entry per job above ("id" copied verbatim from that job's block):
-{{"scores": [{{"id": "<job id>", "score": <int>, "reason": "<one sentence overall summary>", \
-"breakdown": {{"skills": {{"score": <int>, "max": 60, "reason": "<sentence>"}}, \
-"company": {{"score": <int>, "max": 10}}, "remote": {{"score": <int>, "max": 10}}, \
-"role": {{"score": <int>, "max": 20, "reason": "<sentence>"}}}}}}, ...]}}"""
-
-_JOB_BLOCK = """\
---- Job id={id} ---
-Title: {title}
-Company: {company}
-Remote: {remote}
-Description:
-{description}
-"""
+# batch_score_system/batch_score_user are split into a system part (rubric +
+# candidate profile — identical across every batch call in a scoring run)
+# and a user part (job data + response format — different per batch) so the
+# system part can be prompt-cached via litellm's cache_control_injection_points
+# (see _score_batch) instead of resending ~1,800 tokens of static rubric text
+# on every single batch call.
+_PROMPTS = load_prompt_file("raw_scoring")
+_SCORE_RUBRIC = _PROMPTS["score_rubric"]["template"]
+_BATCH_SCORE_SYSTEM_PROMPT = _PROMPTS["batch_score_system"]["template"]
+_BATCH_SCORE_USER_PROMPT = _PROMPTS["batch_score_user"]["template"]
+_JOB_BLOCK = _PROMPTS["job_block"]["template"]
 
 _MAX_BATCH_CHARS = 3_999_000  # ~1M-token context budget at ~4 chars/token, minus a small safety margin
 _MAX_JOBS_PER_BATCH = 7      # also cap by job count, not just chars — keeps individual calls'
