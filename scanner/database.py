@@ -1,3 +1,4 @@
+import hashlib
 import json
 import sqlite3
 import pandas as pd
@@ -82,6 +83,7 @@ def _connect() -> sqlite3.Connection:
         "ALTER TABLE jobs ADD COLUMN structured_score INTEGER",
         "ALTER TABLE jobs ADD COLUMN structured_score_reason TEXT",
         "ALTER TABLE jobs ADD COLUMN structured_score_breakdown TEXT",
+        "ALTER TABLE jobs ADD COLUMN content_hash TEXT",
         "ALTER TABLE referrals ADD COLUMN degree TEXT",
         "ALTER TABLE referrals ADD COLUMN photo_url TEXT",
     ):
@@ -117,19 +119,45 @@ def _norm_key(title, company) -> str:
     return f"{(title or '').strip().lower()}|{(company or '').strip().lower()}"
 
 
+_CONTENT_HASH_MIN_CHARS = 200  # a real JD runs hundreds-to-thousands of chars; this
+# floor exists to keep short/boilerplate descriptions ("Apply through our careers
+# page.") from colliding across UNRELATED jobs at DIFFERENT companies — this hash
+# has no company/title scoping of its own, so it needs the input to be specific
+# enough that two different real postings landing on the same digest is implausible.
+# The cross-source duplicates this is actually meant to catch (the same JD mirrored
+# on LinkedIn and a company's Greenhouse board) always have full JD text, so a high
+# floor costs nothing there while meaningfully reducing false-merge risk on stubs.
+
+
+def content_hash(description: str | None) -> str | None:
+    """sha256 of normalized description text, truncated to 12 hex chars —
+    a save-time dedup signal layered ON TOP OF (not replacing) the existing
+    (title, company) key in save_jobs(), for catching the same posting
+    mirrored across sources under different titles/casing. None for short/
+    trivial text: not a reliable enough identity signal to dedup on (two
+    unrelated jobs could share a near-empty description), so save_jobs()
+    falls back to the (title, company) key alone in that case."""
+    text = (description or "").strip().lower()
+    if len(text) < _CONTENT_HASH_MIN_CHARS:
+        return None
+    return hashlib.sha256(text.encode()).hexdigest()[:12]
+
+
 def save_jobs(df: pd.DataFrame) -> int:  # noqa: C901
     """Insert new jobs, skipping rows that duplicate an existing job's
-    normalized (title, company) pair under a different id — e.g. the same
-    role scraped from LinkedIn and mirrored on its Greenhouse/Lever board.
+    normalized (title, company) pair, OR its content_hash (sha256 of the
+    description — see content_hash()), under a different id — e.g. the same
+    role scraped from LinkedIn and mirrored on its Greenhouse/Lever board,
+    or the same posting under a differently-cased title across sources.
     Returns the number of genuinely new rows inserted.
 
     Rules:
     - status and first_seen are never overwritten on same-id upserts.
     - A same-id row upserts normally (existing behavior).
-    - A row whose (title, company) matches an existing DIFFERENT id is a
-      re-sighting of that job: last_seen is bumped and job_url_direct is
-      backfilled if the canonical row didn't have one yet. No new row is
-      created.
+    - A row whose content_hash OR (title, company) matches an existing
+      DIFFERENT id is a re-sighting of that job (hash checked first):
+      last_seen is bumped and job_url_direct is backfilled if the canonical
+      row didn't have one yet. No new row is created.
     - The same rule applies within a single incoming batch, so combining
       multiple sources in one save_jobs() call can't create duplicates.
     """
@@ -167,14 +195,18 @@ def save_jobs(df: pd.DataFrame) -> int:  # noqa: C901
     # NULLIF/COALESCE: a re-scrape that comes back with a blank/NULL field
     # (e.g. jobspy's per-job description fetch failing transiently) must not
     # clobber a previously-populated value — keep the old value in that case.
+    # content_hash is derived (computed per-row below), not sourced from the
+    # incoming DataFrame like the _STORE_COLS columns — appended separately.
+    upsert_cols = cols + ["content_hash"]
     update_clause = ", ".join(
         f"{c} = COALESCE(NULLIF(excluded.{c}, ''), {c})"
         for c in cols
         if c not in ("id", "status", "first_seen")
-    ) + ", last_seen = datetime('now')"
+    ) + ", content_hash = COALESCE(NULLIF(excluded.content_hash, ''), content_hash)" \
+        ", last_seen = datetime('now')"
 
-    col_names = ", ".join(cols)
-    placeholders = ", ".join("?" * len(cols))
+    col_names = ", ".join(upsert_cols)
+    placeholders = ", ".join("?" * len(upsert_cols))
 
     upsert_sql = f"""
         INSERT INTO jobs ({col_names}, last_seen)
@@ -184,11 +216,12 @@ def save_jobs(df: pd.DataFrame) -> int:  # noqa: C901
 
     with _connect() as conn:
         existing = conn.execute(
-            "SELECT id, title, company, job_url_direct FROM jobs"
+            "SELECT id, title, company, job_url_direct, content_hash FROM jobs"
         ).fetchall()
         existing_ids = {row[0] for row in existing}
         # key -> (canonical_id, current job_url_direct)
         canonical = {_norm_key(row[1], row[2]): (row[0], row[3]) for row in existing}
+        canonical_by_hash = {row[4]: (row[0], row[3]) for row in existing if row[4]}
 
         to_upsert: list[list] = []
         backfill: list[tuple] = []  # (new_job_url_direct_or_None, canonical_id)
@@ -197,21 +230,27 @@ def save_jobs(df: pd.DataFrame) -> int:  # noqa: C901
         for _, row in subset.iterrows():
             row = row.to_dict()
             rid = row["id"]
+            row_hash = content_hash(row.get("description"))
 
             if rid in existing_ids:
-                to_upsert.append([row[c] for c in cols])
+                to_upsert.append([row[c] for c in cols] + [row_hash])
                 continue
 
+            canon = canonical_by_hash.get(row_hash) if row_hash else None
             key = _norm_key(row.get("title"), row.get("company"))
-            if key in canonical:
-                canon_id, canon_direct = canonical[key]
+            if canon is None:
+                canon = canonical.get(key)
+            if canon is not None:
+                canon_id, canon_direct = canon
                 new_direct = row.get("job_url_direct")
                 backfill.append((new_direct if not canon_direct else None, canon_id))
                 continue
 
-            to_upsert.append([row[c] for c in cols])
+            to_upsert.append([row[c] for c in cols] + [row_hash])
             new_count += 1
             canonical[key] = (rid, row.get("job_url_direct"))
+            if row_hash:
+                canonical_by_hash[row_hash] = (rid, row.get("job_url_direct"))
             existing_ids.add(rid)
 
         if to_upsert:
@@ -231,6 +270,31 @@ def save_jobs(df: pd.DataFrame) -> int:  # noqa: C901
                 )
 
     return new_count
+
+
+def backfill_content_hashes(force: bool = False) -> int:
+    """Populate jobs.content_hash for rows saved before this feature existed
+    (new jobs get one automatically at save_jobs() time). Only updates rows
+    where content_hash(description) actually returns something — a job with
+    too short/no description stays NULL and keeps relying on the (title,
+    company) dedup key instead. force=True recomputes every row's hash
+    (e.g. after changing content_hash()'s algorithm), not just rows missing
+    one. Returns the number of rows updated."""
+    with _connect() as conn:
+        query = "SELECT id, description FROM jobs"
+        if not force:
+            query += " WHERE content_hash IS NULL"
+        rows = conn.execute(query).fetchall()
+
+        updated = 0
+        for job_id, description in rows:
+            new_hash = content_hash(description)
+            if new_hash is None:
+                continue
+            conn.execute("UPDATE jobs SET content_hash = ? WHERE id = ?", (new_hash, job_id))
+            updated += 1
+
+    return updated
 
 
 def get_jobs(

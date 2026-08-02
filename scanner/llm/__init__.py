@@ -1,4 +1,5 @@
 import functools
+import hashlib
 import json
 import os
 import re
@@ -23,6 +24,22 @@ class EmptyScoringResultError(RuntimeError):
     means something structural is wrong (the model silently not responding
     as expected) rather than a one-off blip, and continuing would silently
     under-score the rest of the run without any visible signal."""
+
+
+def _batch_short_id(text: str, index: int) -> str:
+    """Short, easy-for-an-LLM-to-copy-verbatim label for one job within a
+    batch, used by raw_scoring/structured_scoring instead of asking the
+    model to echo back a job's real (potentially 400+ char opaque) id —
+    long ids are prone to single-character transcription errors that make
+    the whole entry fail exact-match validation. sha256 of `text`
+    (truncated) plus the job's 1-based position in the batch to guarantee
+    uniqueness even on a hash collision. Purely ephemeral: scoped to a
+    single batch call, never persisted or matched against the DB — contrast
+    with scanner.database.content_hash(), a separate save-time dedup
+    signal built on the same primitive but a different length threshold and
+    persistence model."""
+    digest = hashlib.sha256((text or "").encode()).hexdigest()[:10]
+    return f"{digest}{index}"
 
 
 def _raw_completion_text(response) -> str:
@@ -387,6 +404,7 @@ def _model(provider: str | None = None, model_override: str | None = None) -> st
 _MODEL_CLASS_ENV = {
     "extract":          {"claude": "CLAUDE_EXTRACT_MODEL", "gemini": "GEMINI_EXTRACT_MODEL"},
     "structured_score": {"claude": "CLAUDE_STRUCTURED_SCORE_MODEL", "gemini": "GEMINI_STRUCTURED_SCORE_MODEL"},
+    "referral":         {"claude": "CLAUDE_REFERRAL_MODEL", "gemini": "GEMINI_REFERRAL_MODEL"},
 }
 
 

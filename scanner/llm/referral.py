@@ -3,14 +3,24 @@ from pydantic import BaseModel, ConfigDict, Field
 from . import execute_with_breaker, observe
 
 _REFERRAL_PROMPT = (
-    "You are helping a job seeker write a referral request message to a LinkedIn connection.\n"
-    "Keep it under 150 words, warm but professional, mention the specific role.\n"
-    "If a job URL is provided, include it naturally so the contact can view the listing.\n"
-    "Output only the message text — no subject line, no greeting label.\n\n"
+    "You are writing a short LinkedIn message from a job seeker to a connection, asking for "
+    "a referral. The message MUST do both of these, in order:\n"
+    "1. One brief sentence tying the candidate's background to the role — a specific, "
+    "concrete reason they're relevant, not a generic recap of the whole summary.\n"
+    "2. An explicit, direct ask: request that the contact refer them for the role, or put in "
+    "a good word / point them to the right person if a direct referral isn't possible.\n"
+    "Keep the whole message under 250 words, warm but professional. If a job URL is provided, "
+    "include it naturally near the ask. Output only the message text — no subject line, no "
+    "greeting label, no sign-off placeholder like '[Your Name]'.\n\n"
     "Candidate summary: {summary}\n"
     "Contact: {contact_name}, {contact_title} at {company}\n"
     "Role applying for: {job_title} at {company}\n"
     "Job URL: {job_url}\n"
+)
+
+_REFERRAL_RETRY_NUDGE = (
+    "\nYour previous attempt was too short or didn't clearly ask for a referral. Write a "
+    "complete message that still does both required things above.\n"
 )
 
 _FORM_FIELD_MATCH_PROMPT = """\
@@ -72,11 +82,23 @@ class FormFieldMap(BaseModel):
     resume: str | None = Field(default=None)
 
 
+_REFERRAL_MIN_WORDS = 15
+_REFERRAL_ASK_KEYWORDS = (
+    "refer", "referral", "recommend", "good word", "vouch", "connect me",
+    "point me", "introduce me", "put me in touch",
+)
+
+
+def _looks_like_an_ask(text: str) -> bool:
+    lowered = text.lower()
+    return any(kw in lowered for kw in _REFERRAL_ASK_KEYWORDS)
+
+
 @observe(name="draft_referral_message")
 def draft_referral_message(candidate_summary: str, contact: dict, job: dict) -> str:
     job_url = job.get("job_url_direct") or job.get("job_url") or ""
     prompt = _REFERRAL_PROMPT.format(
-        summary=candidate_summary,
+        summary=candidate_summary[:1000],
         contact_name=contact.get("name", ""),
         contact_title=contact.get("title", ""),
         company=job.get("company", ""),
@@ -85,14 +107,51 @@ def draft_referral_message(candidate_summary: str, contact: dict, job: dict) -> 
     )
 
     def _query(client, model):
-        response = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=600,
-        )
-        return response.choices[0].message.content.strip()
+        max_tokens = 400  # comfortable headroom for a 250-word reply on Flash-Lite (no reasoning-token overhead)
+        current_prompt = prompt
+        for attempt in range(2):
+            response = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": current_prompt}],
+                max_tokens=max_tokens,
+            )
+            choice = response.choices[0]
+            text = (choice.message.content or "").strip()
+            truncated = getattr(choice, "finish_reason", None) == "length"
+            degenerate = len(text.split()) < _REFERRAL_MIN_WORDS or not _looks_like_an_ask(text)
+            if not truncated and not degenerate:
+                return text
+            if attempt == 0:
+                max_tokens = min(max_tokens * 2, 1000)
+                # Truncated output just needs more room; a short/ask-less
+                # output needs the nudge — don't tell a too-long response it
+                # was "too short."
+                if degenerate:
+                    current_prompt = prompt + _REFERRAL_RETRY_NUDGE
+                continue
+            if not text:
+                raise ValueError("Referral draft came back empty after retry.")
+            return text  # best effort — degenerate/possibly-truncated, but non-empty
 
-    return execute_with_breaker(_query, provider_override="gemini")
+    # Pinned to Gemini (confirmed live: the default Claude path via the local
+    # CLIProxyAPI proxy 404s on the configured CLAUDE_MODEL). Uses its own
+    # "referral" model tier — REQUIRES GEMINI_REFERRAL_MODEL=gemini-2.5-flash-
+    # lite in .env (a pinned version, not the gemini-flash-latest alias).
+    # Without that env var set, this silently falls back to GEMINI_MODEL
+    # (gemini-flash-latest) via _model_class_override, which is the exact
+    # model confirmed live to spend ~800 tokens/call on invisible internal
+    # "thinking" before writing anything visible — reproducing the original
+    # mid-sentence-truncation bug with NO error or warning. Flash-Lite does
+    # no such reasoning pass — confirmed live at 165-210 completion tokens
+    # for a complete, on-ask reply to the same prompt. If Claude is ever
+    # revisited here, use claude-sonnet-4-6 (confirmed working live), not
+    # Haiku (confirmed live to refuse the task, self-identifying as "Claude
+    # Code" — the same CLIProxyAPI persona-bridging issue documented in
+    # _query's messages= comment above) — and note _looks_like_an_ask()
+    # below is a keyword check, not a refusal detector: Haiku's refusal text
+    # contained "referral"/"reference the role" and would have passed it,
+    # shipping the refusal as a draft undetected.
+    return execute_with_breaker(_query, provider_override="gemini", model_class="referral")
 
 
 def _format_field_line(c: dict) -> str:

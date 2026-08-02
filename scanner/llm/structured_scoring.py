@@ -163,8 +163,9 @@ Candidate profile (structured JSON, referred to as resume_profile above):
 
 _STRUCTURED_BATCH_SCORE_USER_PROMPT = """\
 There are {n} job(s) below, each a structured JSON object (referred to as job_requirements above) \
-with an "id" field copied verbatim into your response. Judge every one of them — do not skip any \
-and do not invent jobs that aren't listed.
+with an "id" field copied verbatim into your response — a short synthetic label, not the job's \
+real database id (see _score_structured_batch's id_map). Judge every one of them — do not skip \
+any and do not invent jobs that aren't listed.
 
 {jobs_block}
 
@@ -402,9 +403,9 @@ def _compute_structured_breakdown(item: "StructuredJobScoreItem", job: dict, res
     }
 
 
-def _format_structured_job_block(job: dict) -> str:
+def _format_structured_job_block(job: dict, short_id: str) -> str:
     payload = dict(job.get("requirements") or {})
-    payload["id"] = job["id"]
+    payload["id"] = short_id
     payload["is_remote"] = bool(job.get("is_remote"))
     payload["title"] = job.get("title", "")
     payload["company"] = job.get("company", "")
@@ -439,7 +440,16 @@ def _score_structured_batch(resume_json: str, resume: dict, batch: list[dict], l
         _log("Skipped — cancelled.")
         return []
 
-    jobs_block = "\n".join(_format_structured_job_block(job) for job in batch)
+    # Short, hash-derived per-job label instead of the job's real id — same
+    # rationale as raw_scoring._score_batch's id_map. Structured-mode job
+    # dicts carry no raw description text (see _build_structured_batches'
+    # docstring), so hash the requirements JSON instead — deterministic,
+    # unique per job, and already present with no extra plumbing.
+    id_map = {
+        _llm._batch_short_id(json.dumps(job.get("requirements"), sort_keys=True), i): job
+        for i, job in enumerate(batch, start=1)
+    }
+    jobs_block = "\n".join(_format_structured_job_block(job, short_id) for short_id, job in id_map.items())
     system_prompt = _STRUCTURED_BATCH_SCORE_SYSTEM_PROMPT.format(
         rubric=_STRUCTURED_SCORE_RUBRIC, resume_json=resume_json,
     )
@@ -528,16 +538,15 @@ def _score_structured_batch(resume_json: str, resume: dict, batch: list[dict], l
         hb_thread.join(timeout=1)
     _log(f"Done in {time.time() - t0:.1f}s — {len(result.scores)} score(s) returned.")
 
-    by_job = {job["id"]: job for job in batch}
     out = []
     for item in result.scores:
-        job = by_job.get(item.id)
+        job = id_map.get(item.id)
         if job is None:
             continue
         bd = _compute_structured_breakdown(item, job, resume)
         total = bd["skills"]["score"] + bd["company"]["score"] + bd["remote"]["score"] + bd["role"]["score"]
         out.append({
-            "id": item.id,
+            "id": job["id"],  # real job id — item.id is the ephemeral short id, not stored
             "score": total,
             "reason": item.overall_reason,
             "breakdown": json.dumps(bd),
