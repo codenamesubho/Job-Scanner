@@ -175,7 +175,7 @@ def match_form_fields(candidates: list[dict]) -> FormFieldMap:
             model=model,
             messages=[{"role": "user", "content": prompt}],
             response_model=FormFieldMap,
-            max_tokens=300,
+            max_tokens=1000,
             max_retries=1,
             timeout=15,
         )

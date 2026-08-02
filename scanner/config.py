@@ -1,7 +1,7 @@
 import os
 from dotenv import load_dotenv
 
-load_dotenv(dotenv_path="/tmp/Jobscanner/.env")
+load_dotenv(dotenv_path="~/.env")
 
 SEARCH_KEYWORDS = os.getenv("SEARCH_KEYWORDS", "software engineer")
 SEARCH_LOCATION = os.getenv("SEARCH_LOCATION", "Remote")
