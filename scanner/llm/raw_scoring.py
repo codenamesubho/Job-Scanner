@@ -99,7 +99,9 @@ Scoring rubric — four categories per job, sub-scores MUST sum to that job's to
 
 # One LLM call scores every job packed into it (see _build_batches) rather
 # than one call per job — the response is a JSON array, one entry per job,
-# matched back by the "id" copied verbatim from each job block below.
+# matched back by the "id" copied verbatim from each job block below. That
+# id is a short, ephemeral hash-derived label (_batch_short_id), not the
+# job's real database id — see _score_batch's id_map for why.
 #
 # Split into a system part (rubric + candidate profile — identical across
 # every batch call in a scoring run) and a user part (job data + response
@@ -148,9 +150,9 @@ _MAX_TIMEOUT_S      = 600     # hard ceiling regardless of batch size
 _HEARTBEAT_S        = 15      # how often to log "still running" while a call is in flight
 
 
-def _format_job_block(job: dict) -> str:
+def _format_job_block(job: dict, short_id: str) -> str:
     return _JOB_BLOCK.format(
-        id=job["id"],
+        id=short_id,
         title=job.get("title", ""),
         company=job.get("company", ""),
         remote="yes" if job.get("is_remote") else "no",
@@ -174,7 +176,10 @@ def _build_batches(summary: str, jobs: list[dict]) -> list[list[dict]]:
     current_chars = header_overhead
 
     for job in jobs:
-        block = _format_job_block(job)
+        # Real short id isn't assigned until _score_batch builds the final
+        # batch (it depends on position within that batch) — a placeholder
+        # of the same length is all this needs for char-budget estimation.
+        block = _format_job_block(job, "0" * 11)
         block_len = len(block)
 
         if header_overhead + block_len > _MAX_BATCH_CHARS:
@@ -230,7 +235,15 @@ def _score_batch(summary: str, batch: list[dict], log_fn=None, label: str = "",
         _log("Skipped — cancelled.")
         return []
 
-    jobs_block = "\n".join(_format_job_block(job) for job in batch)
+    # Short, hash-derived per-job label instead of the job's real id — a
+    # real id can be a 400+ char opaque token (e.g. JSearch-sourced jobs),
+    # and asking the model to echo one back verbatim is prone to single-
+    # character transcription errors that fail exact-match validation (see
+    # EmptyScoringResultError below). id_map resolves the LLM's short id
+    # back to the real job dict once results come back.
+    id_map = {_llm._batch_short_id(job.get("description"), i): job
+              for i, job in enumerate(batch, start=1)}
+    jobs_block = "\n".join(_format_job_block(job, short_id) for short_id, job in id_map.items())
     system_prompt = _BATCH_SCORE_SYSTEM_PROMPT.format(rubric=_SCORE_RUBRIC, summary=summary[:1500])
     user_prompt = _BATCH_SCORE_USER_PROMPT.format(n=len(batch), jobs_block=jobs_block)
     timeout_s = min(_MAX_TIMEOUT_S, _BASE_TIMEOUT_S + _PER_JOB_TIMEOUT_S * len(batch))
@@ -304,16 +317,16 @@ def _score_batch(summary: str, batch: list[dict], log_fn=None, label: str = "",
         hb_thread.join(timeout=1)
     _log(f"Done in {time.time() - t0:.1f}s — {len(result.scores)} score(s) returned.")
 
-    by_id = {job["id"] for job in batch}
     out = []
     for item in result.scores:
-        if item.id not in by_id or item.score is None:
+        job = id_map.get(item.id)
+        if job is None or item.score is None:
             continue
         bd = item.breakdown
         # Enforce score = sum of breakdown to catch LLM arithmetic errors
         computed = bd.skills.score + bd.company.score + bd.remote.score + bd.role.score
         out.append({
-            "id": item.id,
+            "id": job["id"],  # real job id — item.id is the ephemeral short id, not stored
             "score": computed,
             "reason": item.reason,
             "breakdown": json.dumps(bd.model_dump()),

@@ -117,3 +117,88 @@ def test_parse_jd_extracted_handles_missing_and_invalid(monkeypatch, tmp_path):
     assert database.parse_jd_extracted("") is None
     assert database.parse_jd_extracted("not json") is None
     assert database.parse_jd_extracted('{"must_haves": ["python"]}') == {"must_haves": ["python"]}
+
+
+_LONG_DESCRIPTION = (
+    "We are looking for a Senior Backend Engineer to join our platform team, "
+    "working on distributed systems, event-driven pipelines, and API design. "
+    "You will own core services end-to-end, collaborate closely with product "
+    "and data teams, and help scale our infrastructure as the company grows."
+)
+
+
+def test_content_hash_none_below_threshold_stable_above():
+    assert database.content_hash(None) is None
+    assert database.content_hash("") is None
+    assert database.content_hash("too short") is None
+    # A short boilerplate blurb (the kind of text two DIFFERENT companies'
+    # postings could plausibly share) must stay under the floor — this hash
+    # has no company/title scoping of its own, so a false merge here would
+    # be silent (save_jobs() just returns a lower new_count, nothing flags
+    # it). The floor exists specifically to keep stubs like this out.
+    boilerplate = "We are hiring a Software Engineer. Apply through our careers page."
+    assert len(boilerplate) < database._CONTENT_HASH_MIN_CHARS
+    assert database.content_hash(boilerplate) is None
+
+    h1 = database.content_hash(_LONG_DESCRIPTION)
+    h2 = database.content_hash(_LONG_DESCRIPTION.upper())  # case-insensitive
+    assert h1 is not None
+    assert len(h1) == 12
+    assert h1 == h2  # normalized (stripped/lowercased) before hashing
+
+
+def test_save_jobs_dedups_by_content_hash_across_different_titles(monkeypatch, tmp_path):
+    _isolate_db(monkeypatch, tmp_path)
+
+    df1 = pd.DataFrame([{
+        "id": "linkedin-1", "site": "linkedin", "job_url": "", "job_url_direct": "",
+        "title": "Sr. Backend Engineer", "company": "Acme", "location": "Remote",
+        "date_posted": None, "is_remote": True, "description": _LONG_DESCRIPTION,
+    }])
+    # Different id AND different title (so the (title, company) key alone
+    # would NOT catch this as a duplicate) but identical description text.
+    df2 = pd.DataFrame([{
+        "id": "greenhouse-1", "site": "greenhouse", "job_url": "", "job_url_direct": "https://direct.example/job",
+        "title": "Senior Backend Engineer (Platform)", "company": "Acme", "location": "Remote",
+        "date_posted": None, "is_remote": True, "description": _LONG_DESCRIPTION,
+    }])
+
+    added1 = database.save_jobs(df1)
+    added2 = database.save_jobs(df2)
+
+    assert added1 == 1
+    assert added2 == 0  # merged via content_hash, not inserted as a new row
+
+    jobs = database.get_jobs()
+    assert len(jobs) == 1
+    row = jobs.iloc[0]
+    assert row["id"] == "linkedin-1"  # canonical row is the first-seen one
+    assert row["job_url_direct"] == "https://direct.example/job"  # backfilled from the second sighting
+
+
+def test_backfill_content_hashes_populates_missing_only_by_default(monkeypatch, tmp_path):
+    _isolate_db(monkeypatch, tmp_path)
+
+    df = pd.DataFrame([{
+        "id": "job-1", "site": "test", "job_url": "", "job_url_direct": "",
+        "title": "Engineer", "company": "Acme", "location": "Remote",
+        "date_posted": None, "is_remote": True, "description": _LONG_DESCRIPTION,
+    }])
+    database.save_jobs(df)
+
+    # Simulate a pre-existing row saved before content_hash existed.
+    conn = database._connect()
+    conn.execute("UPDATE jobs SET content_hash = NULL WHERE id = 'job-1'")
+    conn.commit()
+    conn.close()
+
+    updated = database.backfill_content_hashes()
+    assert updated == 1
+
+    jobs = database.get_jobs()
+    assert jobs.iloc[0]["content_hash"] == database.content_hash(_LONG_DESCRIPTION)
+
+    # Second run: already populated, not force — no-op.
+    assert database.backfill_content_hashes() == 0
+    # force=True recomputes regardless.
+    assert database.backfill_content_hashes(force=True) == 1
