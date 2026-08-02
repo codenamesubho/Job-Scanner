@@ -27,7 +27,7 @@ def main():
     parser.add_argument("--top", type=int, default=None,
                          help="Only extract the top N jobs by score (default: all eligible jobs)")
     parser.add_argument("--force", action="store_true",
-                         help="Re-extract every scoreable job, even ones that already have "
+                         help="Re-extract every scorable job, even ones that already have "
                               "jd_extracted populated (default: only jobs missing it)")
     args = parser.parse_args()
 

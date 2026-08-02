@@ -47,6 +47,8 @@ python backfill_score_jobs.py --top 50
 python clear_db.py --jobs
 ```
 
+Dont run git commit by yourself ever, always ask user before you commit
+
 ## Testing
 
 ```bash

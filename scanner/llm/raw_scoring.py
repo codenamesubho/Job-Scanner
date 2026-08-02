@@ -140,12 +140,12 @@ Description:
 """
 
 _MAX_BATCH_CHARS = 3_999_000  # ~1M-token context budget at ~4 chars/token, minus a small safety margin
-_MAX_JOBS_PER_BATCH = 7      # also cap by job count, not just chars — keeps individual calls'
+_MAX_JOBS_PER_BATCH = 3      # also cap by job count, not just chars — keeps individual calls'
                               # output size (and therefore wall-clock time) bounded, and ensures
                               # a large scoring run actually splits into multiple batches that can
                               # run concurrently instead of one huge serial call
 _BASE_TIMEOUT_S     = 60      # per-call timeout floor
-_PER_JOB_TIMEOUT_S  = 10      # extra timeout budget per job in the batch
+_PER_JOB_TIMEOUT_S  = 20      # extra timeout budget per job in the batch
 _MAX_TIMEOUT_S      = 600     # hard ceiling regardless of batch size
 _HEARTBEAT_S        = 15      # how often to log "still running" while a call is in flight
 
