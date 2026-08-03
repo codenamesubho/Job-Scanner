@@ -303,7 +303,8 @@ def get_jobs(
     unscored_only: bool = False,
     missing_structured_score: bool = False,
 ) -> pd.DataFrame:
-    """Return jobs ordered by score desc (nulls last), then newest first.
+    """Return jobs ordered by structured score desc (falling back to raw
+    score, nulls last), then newest first.
 
     `unscored_only` and `missing_structured_score` are independent filters
     (score IS NULL vs. structured_score IS NULL) — structured scoring must
@@ -324,7 +325,7 @@ def get_jobs(
     if missing_structured_score:
         query += " AND structured_score IS NULL"
 
-    query += " ORDER BY COALESCE(score, -1) DESC, first_seen DESC"
+    query += " ORDER BY COALESCE(structured_score, score, -1) DESC, first_seen DESC"
 
     with _connect() as conn:
         return pd.read_sql(query, conn, params=params)
@@ -351,6 +352,21 @@ def parse_jd_extracted(raw: str | None) -> dict | None:
 def update_status(job_id: str, status: str) -> None:
     with _connect() as conn:
         conn.execute("UPDATE jobs SET status = ? WHERE id = ?", (status, job_id))
+
+
+def reject_low_scores(threshold: int = 30) -> int:
+    """Auto-reject jobs whose primary score (structured score, falling back
+    to raw score) is below `threshold`. Only touches rows still at the
+    default 'new' status, so a job the user has already saved/applied
+    to/manually rejected is never overwritten. Returns the number of rows
+    updated."""
+    with _connect() as conn:
+        cur = conn.execute(
+            "UPDATE jobs SET status = 'rejected' "
+            "WHERE status = 'new' AND COALESCE(structured_score, score) < ?",
+            (threshold,),
+        )
+        return cur.rowcount
 
 
 def get_stats() -> dict:

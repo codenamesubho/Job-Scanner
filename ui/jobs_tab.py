@@ -53,9 +53,9 @@ def _render_jobs_table(jobs: pd.DataFrame) -> tuple[pd.DataFrame, list[int]]:
         return pd.DataFrame(), []
 
     st.caption(f"{len(jobs)} job(s) — click a row to view details")
-    # TEMP: structured_score shown alongside score for side-by-side comparison
-    # while evaluating SCORING_MODE=structured — remove column once done comparing.
-    display_cols = ["title", "company", "location", "score", "structured_score",
+    # structured_score leads as the primary score column (see ui/scoring.py's
+    # _render_score_display); raw score is kept alongside for comparison.
+    display_cols = ["title", "company", "location", "structured_score", "score",
                     "is_remote", "date_posted", "status", "first_seen"]
     display_cols = [c for c in display_cols if c in jobs.columns]
     jobs_reset   = jobs.reset_index(drop=True)
@@ -66,8 +66,8 @@ def _render_jobs_table(jobs: pd.DataFrame) -> tuple[pd.DataFrame, list[int]]:
         on_select="rerun",
         key="jobs_table",
         column_config={
-            "score":            st.column_config.NumberColumn("Score", format="%d", width="small"),
-            "structured_score": st.column_config.NumberColumn("Structured Score", format="%d", width="small"),
+            "structured_score": st.column_config.NumberColumn("Score", format="%d", width="small"),
+            "score":            st.column_config.NumberColumn("Raw Score", format="%d", width="small"),
             "title":            st.column_config.TextColumn("Title", width="large"),
             "company":          st.column_config.TextColumn("Company"),
             "location":         st.column_config.TextColumn("Location"),
@@ -116,10 +116,19 @@ def render_jobs_tab(keywords: str, location: str, results: int, hours: int,
         jobs = jobs[jobs["jd_extracted"].apply(
             lambda raw: (parse_jd_extracted(raw) or {}).get("company_type") == company_type_filter
         )]
-    if "score" in jobs.columns:
-        jobs = jobs[jobs["score"].isna() | (jobs["score"] >= min_score)]
-    if "structured_score" in jobs.columns:
-        jobs = jobs.sort_values("structured_score", ascending=False, na_position="last")
+    # Primary score is structured_score (falling back to raw score where
+    # structured scoring hasn't run) — the slider and sort both key off it.
+    if "structured_score" in jobs.columns or "score" in jobs.columns:
+        primary_score = jobs.get("structured_score")
+        if primary_score is None:
+            primary_score = jobs["score"]
+        elif "score" in jobs.columns:
+            primary_score = primary_score.fillna(jobs["score"])
+
+        jobs = jobs.assign(_primary_score=primary_score)
+        jobs = jobs[jobs["_primary_score"].isna() | (jobs["_primary_score"] >= min_score)]
+        jobs = jobs.sort_values("_primary_score", ascending=False, na_position="last")
+        jobs = jobs.drop(columns="_primary_score")
 
     jobs_reset, selected_rows = _render_jobs_table(jobs)
 

@@ -12,13 +12,18 @@ from typing import Optional
 
 from .database import (
     get_jobs, update_scores, update_structured_scores, scoreable_jobs,
-    update_job_fields, parse_jd_extracted,
+    update_job_fields, parse_jd_extracted, reject_low_scores,
 )
 from .llm import (
     score_jobs, score_jobs_structured, scoring_breaker_status, scoring_mode,
     extract_job_requirements, extract_resume_profile, ResumeProfile,
 )
 from .profile import get_candidate, get_latest_resume, extract_text, save_candidate
+
+# Jobs still at the default 'new' status whose primary score (structured,
+# falling back to raw) lands below this are auto-marked 'rejected' after
+# every scoring pass — see database.reject_low_scores().
+REJECT_SCORE_THRESHOLD = 30
 
 
 def extract_missing_job_requirements(log_fn=print, limit: int | None = None,
@@ -30,7 +35,7 @@ def extract_missing_job_requirements(log_fn=print, limit: int | None = None,
     jd_extracted is already populated (e.g. to backfill a newly-added field
     onto jobs extracted before it existed). Either way, only the top
     `limit` of them when given. get_jobs() already orders rows by
-    `COALESCE(score, -1) DESC, first_seen DESC`, so slicing the first
+    `COALESCE(structured_score, score, -1) DESC, first_seen DESC`, so slicing the first
     `limit` rows after filtering is exactly "top N jobs by score" (jobs with
     no score yet sort after every scored one, newest-first among
     themselves). Returns the number of jobs successfully extracted.
@@ -185,4 +190,9 @@ def score_unscored_jobs(log_fn=print, limit:Optional[int]=None) -> int:
             update_fn(result)
             scored += len(result)
     log_fn(f"Scored {scored} job(s).")
+
+    rejected = reject_low_scores(REJECT_SCORE_THRESHOLD)
+    if rejected:
+        log_fn(f"Auto-rejected {rejected} job(s) scoring below {REJECT_SCORE_THRESHOLD}.")
+
     return scored
