@@ -9,7 +9,6 @@ from .scan_handlers import (
     handle_company_boards_scan, handle_jobspy_scan, handle_jsearch_scan,
     handle_linkedin_scan, handle_naukri_scan, handle_scan_all,
 )
-from .scoring import _render_score_button
 
 
 def _render_stats() -> None:
@@ -38,15 +37,13 @@ def _company_type_options() -> list[str]:
 
 
 def _render_filters() -> tuple[str, str, bool, str]:
-    f1, f2, f3, f4, f5 = st.columns([2.5, 1.5, 1, 1.7, 1.3])
+    f1, f2, f3, f4 = st.columns([3, 2, 1, 2])
     search_text   = f1.text_input("Search title / company / location",
                                   placeholder="e.g. senior, Google…")
     status_filter = f2.selectbox("Status", ["All"] + STATUSES)
     f3.markdown("<div style='height:1.9rem'></div>", unsafe_allow_html=True)
     remote_only   = f3.checkbox("Remote only")
     company_type_filter = f4.selectbox("Company type", ["All"] + _company_type_options())
-    f5.markdown("<div style='height:1.9rem'></div>", unsafe_allow_html=True)
-    _render_score_button(f5)
     return search_text, status_filter, remote_only, company_type_filter
 
 
