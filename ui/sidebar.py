@@ -3,6 +3,7 @@ import streamlit as st
 from scanner import get_criteria
 
 from .constants import HOURS_OPTIONS
+from .scoring import _render_score_button
 
 
 def seed_sidebar_defaults() -> None:
@@ -57,6 +58,8 @@ def render_sidebar() -> tuple[str, str, int, int, bool, bool, bool, bool, bool, 
             help="Runs every source below at once, each in its own thread, "
                  "with a live progress bar + log per source.",
         )
+
+        _render_score_button()
 
         st.markdown("**Individual Sources**")
         scan_clicked   = st.button("🔍 LinkedIn (jobspy)",  use_container_width=True)
