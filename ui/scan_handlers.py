@@ -27,15 +27,14 @@ def _run_individual(name: str, runner, keywords: str, location: str, results: in
     try:
         found, new_count = runner(keywords, location, results, hours, log_fn, progress_fn)
         progress.empty()
-        log_box.empty()
         if found == 0 and new_count == 0:
             st.info(f"{name}: nothing found (see log above if this is unexpected).")
         else:
+            log_box.empty()
             st.success(f"{name}: {found} found, {new_count} new.")
         _auto_score_new()
     except Exception as e:
         progress.empty()
-        log_box.empty()
         st.error(f"{name} scan failed: {e}")
 
 
@@ -74,11 +73,13 @@ def _run_linkedin_login_alone(keywords: str, location: str, results: int, hours:
         found, new_count = _run_linkedin_login(keywords, location, results, hours,
                                                  li_log_fn, li_progress_fn)
         li_progress.empty()
-        li_log_box.empty()
-        st.success(f"LinkedIn (login): {found} found, {new_count} new.")
+        if found == 0 and new_count == 0:
+            st.info("LinkedIn (login): nothing found (see log above if this is unexpected).")
+        else:
+            li_log_box.empty()
+            st.success(f"LinkedIn (login): {found} found, {new_count} new.")
     except Exception as e:
         li_progress.empty()
-        li_log_box.empty()
         st.error(f"LinkedIn (login) failed: {e}")
 
 
