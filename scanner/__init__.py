@@ -4,7 +4,7 @@ from .database import (
     save_jobs, get_jobs, update_status, get_stats, update_scores,
     update_structured_scores, parse_jd_extracted,
     save_referral, get_referrals, delete_referral, scoreable_jobs,
-    backfill_content_hashes,
+    backfill_content_hashes, reject_low_scores,
 )
 from .profile import (
     save_candidate, get_candidate,
