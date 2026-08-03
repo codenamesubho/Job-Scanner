@@ -162,16 +162,19 @@ def _auto_score_new() -> None:
         st.info(f"Scored {scored} new job(s).")
 
 
-def _render_score_button() -> None:
+def _render_score_button(score_col=st) -> None:
     """Runs scoring in a background thread, tracked in session_state, and
     polls via short sleep + st.rerun() ticks (rather than one long blocking
     loop) so the button click that starts a re-run can actually be delivered
     and processed while a job is in progress — that's what lets a second
     click on this same button act as Cancel instead of being ignored until
     the whole run finishes.
+
+    `score_col` is the column the button itself renders into (so it can sit
+    aligned with the other filter controls); progress/log output below the
+    button always renders full-width via the plain `st` module.
     """
     job = st.session_state.get("_score_job")
-    _, score_col = st.columns([4, 1])
 
     if job is None:
         if not score_col.button("🎯 Score Jobs", use_container_width=True):
@@ -314,38 +317,21 @@ def _score_color(score: int) -> str:
 def _render_score_display(sel: pd.Series) -> None:
     score_val = sel.get("score")
     structured_score_val = sel.get("structured_score")
+    has_structured = pd.notna(structured_score_val)
     score_col, btn_col = st.columns([3, 1])
-    if pd.notna(score_val):
-        breakdown_raw = sel.get("score_breakdown", "") or ""
-        reason        = sel.get("score_reason", "") or ""
 
-        parsed   = parse_score_breakdown(breakdown_raw, fallback_score=score_val)
-        computed = parsed["computed_score"]
-        score_col.metric(label="Match Score", value=f"{_score_color(computed)} {computed} / 100")
-
-        if parsed["items"]:
-            for label, sc, mx, rsn in parsed["items"]:
-                line = f"**{label}**: {sc}/{mx}"
-                if rsn:
-                    line += f" — {rsn}"
-                st.markdown(line)
-        elif parsed["legacy_lines"]:
-            st.markdown("\n".join(f"- {p}" for p in parsed["legacy_lines"]))
-
-        if reason:
-            st.caption(reason)
-    else:
-        score_col.caption("Not yet scored.")
-
-    # Structured score (SCORING_MODE=structured) is kept in separate columns
-    # so it can be compared against the raw score above for the same job.
-    if pd.notna(structured_score_val):
+    # Structured score (SCORING_MODE=structured) leads, since it's the
+    # primary scoring path going forward.
+    if has_structured:
         structured_breakdown_raw = sel.get("structured_score_breakdown", "") or ""
         structured_reason = sel.get("structured_score_reason", "") or ""
 
         structured_parsed = parse_score_breakdown(structured_breakdown_raw, fallback_score=structured_score_val)
         structured_computed = structured_parsed["computed_score"]
-        st.markdown(f"**{_score_color(structured_computed)} Structured: {structured_computed} / 100**")
+        score_col.metric(
+            label="Structured Match Score",
+            value=f"{_score_color(structured_computed)} {structured_computed} / 100",
+        )
 
         if structured_parsed["items"]:
             for label, sc, mx, rsn in structured_parsed["items"]:
@@ -358,6 +344,33 @@ def _render_score_display(sel: pd.Series) -> None:
 
         if structured_reason:
             st.caption(structured_reason)
+    else:
+        score_col.caption("Not yet scored (structured).")
+
+    # Raw score kept for side-by-side comparison, collapsed by default once a
+    # structured score exists to lead with; expanded when it's the only score.
+    with st.expander("Raw score details", expanded=not has_structured):
+        if pd.notna(score_val):
+            breakdown_raw = sel.get("score_breakdown", "") or ""
+            reason        = sel.get("score_reason", "") or ""
+
+            parsed   = parse_score_breakdown(breakdown_raw, fallback_score=score_val)
+            computed = parsed["computed_score"]
+            st.metric(label="Match Score", value=f"{_score_color(computed)} {computed} / 100")
+
+            if parsed["items"]:
+                for label, sc, mx, rsn in parsed["items"]:
+                    line = f"**{label}**: {sc}/{mx}"
+                    if rsn:
+                        line += f" — {rsn}"
+                    st.markdown(line)
+            elif parsed["legacy_lines"]:
+                st.markdown("\n".join(f"- {p}" for p in parsed["legacy_lines"]))
+
+            if reason:
+                st.caption(reason)
+        else:
+            st.caption("Not yet scored.")
 
     job_id = sel.get("id", "")
     if btn_col.button("↺ Rescore", key=f"rescore_{job_id}", use_container_width=True):
