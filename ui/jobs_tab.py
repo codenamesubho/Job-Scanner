@@ -1,7 +1,7 @@
 import pandas as pd
 import streamlit as st
 
-from scanner import get_jobs, get_stats
+from scanner import get_jobs, get_stats, parse_jd_extracted
 
 from .constants import DEFAULT_MIN_SCORE, STATUSES
 from .detail_panel import _job_detail_dialog
@@ -22,14 +22,32 @@ def _render_stats() -> None:
     m5.metric("Rejected", stats["rejected"])
 
 
-def _render_filters() -> tuple[str, str, bool, int]:
-    f1, f2, f3 = st.columns([2, 2, 1])
+def _company_type_options() -> list[str]:
+    """Distinct `company_type` values pulled from jobs.jd_extracted (populated
+    under SCORING_MODE=structured only). Returns [] otherwise, which collapses
+    the filter to just "All"."""
+    all_jobs = get_jobs()
+    if "jd_extracted" not in all_jobs.columns:
+        return []
+    types = set()
+    for raw in all_jobs["jd_extracted"]:
+        parsed = parse_jd_extracted(raw)
+        if parsed and parsed.get("company_type"):
+            types.add(parsed["company_type"])
+    return sorted(types)
+
+
+def _render_filters() -> tuple[str, str, bool, str]:
+    f1, f2, f3, f4, f5 = st.columns([2.5, 1.5, 1, 1.7, 1.3])
     search_text   = f1.text_input("Search title / company / location",
                                   placeholder="e.g. senior, Google…")
     status_filter = f2.selectbox("Status", ["All"] + STATUSES)
+    f3.markdown("<div style='height:1.9rem'></div>", unsafe_allow_html=True)
     remote_only   = f3.checkbox("Remote only")
-    min_score     = st.slider("Minimum score", 0, 100, value=DEFAULT_MIN_SCORE)
-    return search_text, status_filter, remote_only, min_score
+    company_type_filter = f4.selectbox("Company type", ["All"] + _company_type_options())
+    f5.markdown("<div style='height:1.9rem'></div>", unsafe_allow_html=True)
+    _render_score_button(f5)
+    return search_text, status_filter, remote_only, company_type_filter
 
 
 def _render_jobs_table(jobs: pd.DataFrame) -> tuple[pd.DataFrame, list[int]]:
@@ -87,9 +105,9 @@ def render_jobs_tab(keywords: str, location: str, results: int, hours: int,
         handle_jsearch_scan(keywords, location, results, hours)
 
     st.divider()
-    _render_score_button()
 
-    search_text, status_filter, remote_only, min_score = _render_filters()
+    search_text, status_filter, remote_only, company_type_filter = _render_filters()
+    min_score = st.slider("Minimum score", 0, 100, value=DEFAULT_MIN_SCORE)
 
     jobs = get_jobs(
         status=None if status_filter == "All" else status_filter,
@@ -97,6 +115,10 @@ def render_jobs_tab(keywords: str, location: str, results: int, hours: int,
     )
     if remote_only:
         jobs = jobs[jobs["is_remote"] == 1]
+    if company_type_filter != "All" and "jd_extracted" in jobs.columns:
+        jobs = jobs[jobs["jd_extracted"].apply(
+            lambda raw: (parse_jd_extracted(raw) or {}).get("company_type") == company_type_filter
+        )]
     if "score" in jobs.columns:
         jobs = jobs[jobs["score"].isna() | (jobs["score"] >= min_score)]
     if "structured_score" in jobs.columns:

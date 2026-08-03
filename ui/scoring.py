@@ -162,16 +162,19 @@ def _auto_score_new() -> None:
         st.info(f"Scored {scored} new job(s).")
 
 
-def _render_score_button() -> None:
+def _render_score_button(score_col=st) -> None:
     """Runs scoring in a background thread, tracked in session_state, and
     polls via short sleep + st.rerun() ticks (rather than one long blocking
     loop) so the button click that starts a re-run can actually be delivered
     and processed while a job is in progress — that's what lets a second
     click on this same button act as Cancel instead of being ignored until
     the whole run finishes.
+
+    `score_col` is the column the button itself renders into (so it can sit
+    aligned with the other filter controls); progress/log output below the
+    button always renders full-width via the plain `st` module.
     """
     job = st.session_state.get("_score_job")
-    _, score_col = st.columns([4, 1])
 
     if job is None:
         if not score_col.button("🎯 Score Jobs", use_container_width=True):
