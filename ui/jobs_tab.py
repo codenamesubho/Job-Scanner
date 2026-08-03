@@ -37,13 +37,13 @@ def _company_type_options() -> list[str]:
 
 
 def _render_filters() -> tuple[str, str, bool, str]:
-    f1, f2, f3, f4 = st.columns([3, 2, 1, 2])
+    f1, f2, f3, f4 = st.columns([3, 2, 2, 1])
     search_text   = f1.text_input("Search title / company / location",
                                   placeholder="e.g. senior, Google…")
     status_filter = f2.selectbox("Status", ["All"] + STATUSES)
-    f3.markdown("<div style='height:1.9rem'></div>", unsafe_allow_html=True)
-    remote_only   = f3.checkbox("Remote only")
-    company_type_filter = f4.selectbox("Company type", ["All"] + _company_type_options())
+    f4.markdown("<div style='height:1.9rem'></div>", unsafe_allow_html=True)
+    remote_only   = f4.checkbox("Remote only")
+    company_type_filter = f3.selectbox("Company type", ["All"] + _company_type_options())
     return search_text, status_filter, remote_only, company_type_filter
 
 
