@@ -819,6 +819,26 @@ def search_jobs(
     seen_ids: set[str]   = set()
     pages_done = 0
 
+    # set_log_fn() (used by the Streamlit UI) may route _log() into an
+    # st.empty() placeholder, which requires Streamlit's ScriptRunContext —
+    # thread-local and normally only attached to the main script thread.
+    # _scrape_one_page runs in ThreadPoolExecutor worker threads, so without
+    # explicitly propagating the calling thread's context, any _log() call
+    # from a worker raises NoSessionContext. Lazily imported and guarded so
+    # CLI callers (main.py, cron_scan.py — no Streamlit runtime) are
+    # unaffected: get_script_run_ctx() just returns None there.
+    try:
+        from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
+        _st_ctx = get_script_run_ctx()
+    except ImportError:
+        add_script_run_ctx = None
+        _st_ctx = None
+
+    def _run_page(page_num: int) -> list[dict]:
+        if add_script_run_ctx is not None:
+            add_script_run_ctx(threading.current_thread(), _st_ctx)
+        return _scrape_one_page(page_num, keywords, location, seconds)
+
     # Not a `with` block on purpose: exiting `with ThreadPoolExecutor()` calls
     # shutdown(wait=True), which blocks a KeyboardInterrupt/exception unwind
     # until every in-flight page scrape finishes — see the same pattern (and
@@ -826,7 +846,7 @@ def search_jobs(
     pool = ThreadPoolExecutor(max_workers=num_pages)
     try:
         futures = {
-            pool.submit(_scrape_one_page, pn, keywords, location, seconds): pn
+            pool.submit(_run_page, pn): pn
             for pn in range(num_pages)
         }
         for future in as_completed(futures):
