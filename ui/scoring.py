@@ -14,7 +14,7 @@ from scanner import (
 from scanner.database import update_job_fields
 
 from .constants import (
-    AUTO_SCORE_LOG_TAIL_LINES, LOG_TAIL_LINES, POLL_INTERVAL_S,
+    AUTO_SCORE_LOG_BOX_HEIGHT_PX, LOG_BOX_HEIGHT_PX, POLL_INTERVAL_S,
     SCORE_BUTTON_POLL_S, SCORE_GOOD_THRESHOLD, SCORE_OK_THRESHOLD,
 )
 
@@ -141,10 +141,10 @@ def _auto_score_new() -> None:
         with state_lock:
             scored = state["scored"]
             total  = state["total"]
-            lines  = list(state["log"][-AUTO_SCORE_LOG_TAIL_LINES:])
+            lines  = list(state["log"])
         if total:
             progress.progress(min(scored / total, 1.0), text=f"Scoring {scored} / {total} job(s)…")
-        log_box.code("\n".join(lines))
+        log_box.code("\n".join(lines), height=AUTO_SCORE_LOG_BOX_HEIGHT_PX)
         time.sleep(POLL_INTERVAL_S)
 
     with state_lock:
@@ -276,7 +276,7 @@ def _render_score_button() -> None:
     with job["lock"]:
         scored = job["state"]["scored"]
         total  = job["state"]["total"]
-        lines  = list(job["state"]["log"][-LOG_TAIL_LINES:])
+        lines  = list(job["state"]["log"])
         done   = job["state"]["done"]
         error  = job["state"]["error"]
         skip   = job["state"]["skip"]
@@ -286,7 +286,7 @@ def _render_score_button() -> None:
         st.progress(min(scored / total, 1.0), text=f"Scoring {scored} / {total} job(s)…")
     else:
         st.progress(0, text="Extracting structured JD data…" if not done else "Done.")
-    st.code("\n".join(lines))
+    st.code("\n".join(lines), height=LOG_BOX_HEIGHT_PX)
 
     if done:
         del st.session_state["_score_job"]
