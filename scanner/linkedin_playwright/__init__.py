@@ -19,14 +19,17 @@ import search_jobs` keeps working:
     people.py        profile scraping and referral-contact discovery
     messaging.py     sending a LinkedIn DM
 """
-from .descriptions import _fetch_descriptions_via_semantic_click, _fetch_job_description
 from .jobs import (
-    SEARCH_URL, SEMANTIC_SEARCH_URL, _extract_cards, _extract_job_id,
-    _extract_semantic_cards, _scrape_job_cards, build_search_url, search_jobs,
+    SEARCH_URL, SEMANTIC_SEARCH_URL, _extract_job_id, _extract_semantic_cards,
+    build_search_url, search_jobs,
 )
 from .messaging import send_linkedin_message
 from .people import _degree_rank, _is_real_name, _manager_keywords, _role_keywords, find_referral_contacts
-from .session import SESSION_FILE, _launch, _log, _save_session, login, set_log_fn
+from .session import SESSION_FILE, login, set_log_fn
+
+# The private names above are re-exported only because tests reach them through
+# the package (`from scanner import linkedin_playwright as li`). Everything else
+# imports from the submodule directly, so nothing else belongs here.
 
 __all__ = [
     # Public API

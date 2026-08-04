@@ -55,10 +55,16 @@ playwright install chromium     # needed for LinkedIn/Naukri login, referrals, a
 ### 4. Configure
 
 ```bash
-cp .env.example .env
+cp .env.example ~/.env          # note: home directory, not the repo
 ```
 
-Edit `.env` — see the comments in `.env.example` for the full list. At minimum:
+**Where config is read from:** `scanner/config.py` and `scanner/llm/__init__.py` both call
+`load_dotenv(os.getenv("ENV_FILE", "~/.env"), override=True)` — so by default settings come
+from **`~/.env`**, not a `.env` inside the repo, and they override anything already exported
+in your shell. To keep config in the project instead, copy it to `./.env` and export
+`ENV_FILE=./.env`.
+
+Edit it — see the comments in `.env.example` for the full list. At minimum:
 
 ```env
 # CLI-only defaults (the web UI ignores these — see below)
@@ -127,9 +133,14 @@ Shows live counts of **Total / New / Shortlisted / Applied / Rejected** across a
 | Search box | Filter by title, company, or location substring |
 | Status dropdown | Show only jobs in a given status bucket |
 | Remote only | Filter to jobs flagged `is_remote = true` by the source |
+| Company type | Filter by the `company_type` extracted into `jd_extracted` (`SCORING_MODE=structured` only — collapses to just "All" otherwise) |
 | Minimum score | Hide jobs scored below this threshold (unscored jobs are always shown) |
 
+Directly above the filters, **➕ Add job by URL** saves a single posting from a pasted Greenhouse/Lever/Ashby/LinkedIn link.
+
 #### Job table & detail view
+
+The table's **Score** column is the structured score, with the raw score shown alongside as **Raw Score**; the Minimum-score slider and the sort both key off the structured score, falling back to the raw one where structured scoring hasn't run.
 
 Click a row to open its detail view: full description, match score breakdown, status editor, **Apply** (opens the application page in a browser and auto-fills what it can), and the **Referrals** section (find contacts, draft a message, send as a LinkedIn DM or open pre-filled).
 
@@ -321,6 +332,7 @@ Job_Scanner/
 │   │   ├── raw_scoring.py    # SCORING_MODE=raw — scores raw JD text
 │   │   ├── structured_scoring.py  # SCORING_MODE=structured — scores JSON against JSON
 │   │   ├── referral.py       # Referral message drafting + apply-form field matching
+│   │   ├── _prompt_loader.py # Loads prompts/*.json
 │   │   └── prompts/          # Prompt text, kept out of the Python source
 │   ├── scoring.py            # score_unscored_jobs() + the structured-mode extraction helpers
 │   ├── database.py           # SQLite: jobs + referrals — save, query, dedup, status/score updates

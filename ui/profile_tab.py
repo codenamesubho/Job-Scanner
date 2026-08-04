@@ -10,6 +10,7 @@ from scanner import (
 )
 
 from .constants import HOURS_OPTIONS
+from .session_keys import EDITING_PROFILE, LAST_RESUME_KEY
 
 
 def _render_candidate_section() -> None:
@@ -91,10 +92,10 @@ def _render_resume_section() -> None:
         return
 
     file_key = f"{uploaded.name}_{uploaded.size}"
-    if st.session_state.get("_last_resume_key") == file_key:
+    if st.session_state.get(LAST_RESUME_KEY) == file_key:
         return
 
-    st.session_state["_last_resume_key"] = file_key
+    st.session_state[LAST_RESUME_KEY] = file_key
     raw  = uploaded.read()
     save_resume(uploaded.name, uploaded.type, raw)
     text = extract_text(uploaded.name, raw)
@@ -131,7 +132,7 @@ def _render_resume_section() -> None:
 
 
 def _render_profile_form() -> None:
-    _ep      = st.session_state.get("_editing_profile")
+    _ep      = st.session_state.get(EDITING_PROFILE)
     _is_edit = _ep is not None
 
     st.markdown(f"**Editing: {_ep['name']}**" if _is_edit else "**Add new profile**")
@@ -164,7 +165,7 @@ def _render_profile_form() -> None:
         cancelled     = _is_edit and btn2.form_submit_button("✕ Cancel", use_container_width=True)
 
     if cancelled:
-        st.session_state.pop("_editing_profile", None)
+        st.session_state.pop(EDITING_PROFILE, None)
         st.rerun()
 
     if submitted:
@@ -174,7 +175,7 @@ def _render_profile_form() -> None:
         _cid = _ep["id"] if _is_edit else None
         save_criteria(ap_name.strip(), ap_keywords, ap_location,
                       ap_results, ap_hours, ap_remote, criteria_id=_cid)
-        st.session_state.pop("_editing_profile", None)
+        st.session_state.pop(EDITING_PROFILE, None)
         # Consumed by ui/sidebar.py's seed_sidebar_defaults(), which app.py
         # calls before render_sidebar() creates the sidebar widgets — writing
         # to a widget's session_state key after the widget exists raises
@@ -221,12 +222,12 @@ def _render_search_profiles_section() -> None:
                     st.rerun()
                 if edit_col.button("✏️", key=f"edit_prof_{prof['id']}",
                                    use_container_width=True, help="Edit this profile"):
-                    st.session_state._editing_profile = prof
+                    st.session_state[EDITING_PROFILE] = prof
                     st.rerun()
                 if del_col.button("🗑", key=f"del_prof_{prof['id']}",
                                   use_container_width=True):
-                    if st.session_state.get("_editing_profile", {}).get("id") == prof["id"]:
-                        st.session_state.pop("_editing_profile", None)
+                    if st.session_state.get(EDITING_PROFILE, {}).get("id") == prof["id"]:
+                        st.session_state.pop(EDITING_PROFILE, None)
                     delete_criteria(prof["id"])
                     st.rerun()
     else:
