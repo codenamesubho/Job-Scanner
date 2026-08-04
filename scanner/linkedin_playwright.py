@@ -11,9 +11,7 @@ into a UI log panel instead.
 
 import re
 import threading
-import time
 import warnings
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlencode, quote_plus
@@ -156,9 +154,7 @@ def _wait_for_search_results(page: Page) -> None:
 def _wait_for_job_results(page: Page) -> None:
     """Wait for the job-search results list (or a 'no results' banner) to
     actually render before scraping — `domcontentloaded` fires well before
-    LinkedIn's client-side JS has populated any job cards, which is
-    especially likely to lose the race when several search pages are being
-    scraped in parallel."""
+    LinkedIn's client-side JS has populated any job cards."""
     try:
         page.wait_for_selector(
             "a[href*='/jobs/view/'], .jobs-search-no-results-banner, "
@@ -167,6 +163,71 @@ def _wait_for_job_results(page: Page) -> None:
         )
     except Exception:
         page.wait_for_timeout(2000)
+
+
+def _wait_for_first_card_ready(page: Page, timeout: int = 10000) -> None:
+    """Make sure the first job card in the list is actually loaded and its
+    description panel reflects THAT job — not just any leftover content from
+    the previous page — before scrolling/scraping starts.
+
+    LinkedIn auto-selects a job on page load, but right after a pagination
+    click the panel can still be showing the previous page's description
+    while the new list renders underneath it; a plain "is there description
+    text yet" check can pass on that stale content, since it never goes
+    empty in between. Explicitly (re-)clicking the first visible card and
+    waiting for the panel to refresh after that click is the only way to be
+    sure the description shown actually belongs to the current first card —
+    without it, that first card was intermittently read as empty later
+    ("Panel empty ... will fallback"), especially on page 2+.
+
+    Skipped on /jobs/search-results/ (natural_language mode): unlike the
+    classic /jobs/search/ list, its one real <a href="/jobs/view/..."> is a
+    full navigation link, not an in-place panel switch — clicking it
+    navigates the whole page away from the results list instead of just
+    updating the side panel, which left the list-reading code that runs
+    right after this looking at an empty page. That endpoint's panel is
+    already populated for the auto-selected job via `currentJobId` on load,
+    so there's nothing to click there in the first place.
+    """
+    if "/jobs/search-results/" in page.url:
+        desc_selector = ", ".join(_DESC_SELECTORS)
+        try:
+            page.wait_for_function(
+                """(sel) => {
+                    const el = document.querySelector(sel);
+                    return !!el && el.innerText.trim().length > 50;
+                }""",
+                arg=desc_selector,
+                timeout=timeout,
+            )
+        except Exception:
+            pass
+        return
+
+    try:
+        page.wait_for_selector("a[href*='/jobs/view/']", timeout=timeout)
+    except Exception:
+        return
+
+    link = page.query_selector("a[href*='/jobs/view/']")
+    if link:
+        try:
+            link.click()
+        except Exception:
+            pass
+
+    desc_selector = ", ".join(_DESC_SELECTORS)
+    try:
+        page.wait_for_function(
+            """(sel) => {
+                const el = document.querySelector(sel);
+                return !!el && el.innerText.trim().length > 50;
+            }""",
+            arg=desc_selector,
+            timeout=timeout,
+        )
+    except Exception:
+        pass
 
 
 def _profile_container(link):
@@ -540,7 +601,6 @@ def login(email: str, password: str) -> bool:
 _JOBS_PER_PAGE = 25  # LinkedIn's fixed page size for job search
 _MIN_PAGES     = 3   # always scan at least this many pages per keyword
 _MAX_PAGES     = 4   # LinkedIn search results get unreliable/rate-limited beyond this
-_MAX_PARALLEL_WORKERS = 1  # cap concurrent browser instances to avoid 429s/li.protects.net blocks
 _MAX_SCROLL_ATTEMPTS = 8  # cards load ~7 at a time; enough headroom to reach 25 per page
 
 
@@ -578,11 +638,20 @@ def _find_scroll_container(page: Page):
 
 def _scroll_step(page: Page, container) -> None:
     """Scroll one step toward the bottom of the job list — the container if
-    found, else the window as a fallback — then wait for lazy content."""
+    found, else the window as a fallback — then wait for lazy content.
+
+    Moves by 3/4 of the viewport height per step rather than jumping straight
+    to scrollHeight, so lazy-loaded cards render in smaller, more human-like
+    increments instead of one large jump.
+    """
     if container:
-        container.evaluate("el => el.scrollTo(0, el.scrollHeight)")
+        container.evaluate(
+            "el => el.scrollTo(0, Math.min(el.scrollTop + el.clientHeight * 0.75, el.scrollHeight))"
+        )
     else:
-        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        page.evaluate(
+            "() => window.scrollTo(0, Math.min(window.scrollY + window.innerHeight * 0.75, document.body.scrollHeight))"
+        )
     page.wait_for_timeout(1500)
 
 
@@ -658,6 +727,45 @@ def _extract_cards(page: Page, seen_ids: set[str], limit: int) -> list[dict]:
         except Exception:
             continue
 
+    return rows
+
+
+def _extract_semantic_cards(page: Page, seen_ids: set[str], limit: int) -> list[dict]:
+    """One extraction pass over LinkedIn's natural-language/semantic search
+    results UI (keyword_mode="natural_language"), which renders
+    /jobs/search-results/ with an entirely different, obfuscated component
+    tree than the classic /jobs/search/ list _extract_cards() handles — no
+    stable class names, no per-card <a href>, no title/company text anywhere
+    in the card markup itself. The one thing it does expose reliably is each
+    card's job id, via a `componentkey="job-card-component-ref-{id}"`
+    attribute. Returns id-only rows; _fetch_job_description() fills in
+    title/company (from the job page's <title> tag) and description once
+    each row is visited.
+    """
+    numeric_ids: list[str] = page.evaluate("""
+        () => [...new Set(
+            [...document.querySelectorAll("[componentkey^='job-card-component-ref-']")]
+                .map(e => e.getAttribute('componentkey').replace('job-card-component-ref-', ''))
+        )]
+    """)
+
+    rows: list[dict] = []
+    for numeric_id in numeric_ids:
+        if len(rows) >= limit:
+            break
+        job_id = f"li-{numeric_id}"
+        if job_id in seen_ids:
+            continue
+        seen_ids.add(job_id)
+        rows.append({
+            "id":        job_id,
+            "site":      "linkedin",
+            "job_url":   f"https://www.linkedin.com/jobs/view/{numeric_id}/",
+            "title":     "",
+            "company":   "",
+            "location":  "",
+            "is_remote": 0,
+        })
     return rows
 
 
@@ -740,13 +848,22 @@ def _read_description_from_page(page: Page, row: dict) -> None:
                     row["job_url_direct"] = href
                     break
 
+_JOB_DESCRIPTION_PAGE_SETTLE_MS = 750
 
 def _fetch_job_description(page: Page, row: dict) -> None:
-    """Fallback: navigate to the job page to get description + date_posted."""
+    """Fallback: navigate to the job page to get description + date_posted.
+
+    Also fills in title/company when the caller didn't already have them
+    (e.g. _extract_semantic_cards() rows, which start out id-only) by
+    parsing the page's own <title> tag — "{Job Title} | {Company} |
+    LinkedIn" — since that's stable regardless of whatever obfuscated class
+    names the page body itself is using.
+    """
     title = row.get("title", row["id"])
     _log(f"  Fallback nav for: {title!r}")
     try:
         page.goto(row["job_url"], wait_until="domcontentloaded")
+        page.wait_for_timeout(_JOB_DESCRIPTION_PAGE_SETTLE_MS)
         try:
             page.wait_for_selector(
                 "#job-details, .jobs-description__content, "
@@ -755,6 +872,15 @@ def _fetch_job_description(page: Page, row: dict) -> None:
             )
         except Exception:
             page.wait_for_timeout(3000)
+
+        if not row.get("title") or not row.get("company"):
+            parts = [part.strip() for part in page.title().split("|")]
+            if len(parts) >= 2:
+                if not row.get("title"):
+                    row["title"] = parts[0]
+                if not row.get("company"):
+                    row["company"] = parts[1]
+
         _read_description_from_page(page, row)
     except Exception:
         pass
@@ -813,90 +939,254 @@ def _fetch_descriptions_via_panel(page: Page, rows: list[dict]) -> list[dict]:
         else:
             _log(f"  [{i+1}/{total}] Got description via panel: {title!r}")
 
-        page.wait_for_timeout(500)  # brief pause between card clicks
+        page.wait_for_timeout(1500)  # brief pause between card clicks
 
     return needs_fallback
 
 
-def _scrape_one_page(
-    page_num: int,
+def _fetch_descriptions_via_semantic_click(page: Page, rows: list[dict]) -> list[dict]:
+    """Click each job card in LinkedIn's natural-language/semantic search UI
+    (keyword_mode="natural_language") to load its description into the
+    right-side panel in place — no page navigation — instead of visiting
+    each job's own page one at a time via _fetch_job_description(). That
+    full-navigation fallback is what _scrape_pages() used exclusively before
+    this (there's no per-card link to click there, unlike the classic list),
+    and measured live at ~13s/job; clicking through the cards here measured
+    at ~2s/job instead — about 7x faster for a mode that's already debug-only
+    and slow to iterate on.
+
+    Cards are found via the same `componentkey="job-card-component-ref-{id}"`
+    attribute _extract_semantic_cards() uses to discover them — this UI has
+    no other stable way to target a specific card. After a click, the
+    description streams into a job-id-scoped container,
+    `#JobDetails_AboutTheJob_{id}`; waiting for that specific id (rather than
+    a generic "is there description text anywhere" check, which this UI's
+    obfuscated markup can't support the way _DESC_SELECTORS does for the
+    classic list) avoids reading stale content left over from whichever job
+    was selected before this click. Title/company come from the page's own
+    <title> tag ("{Job Title} | {Company} | LinkedIn") — LinkedIn keeps that
+    updated on selection even though the click never triggers a real
+    navigation.
+
+    Returns rows the click approach couldn't fill in (card not found, or the
+    panel didn't load in time) so the caller can fall back to
+    _fetch_job_description()'s slower full navigation for just those.
+    """
+    needs_fallback: list[dict] = []
+    total = len(rows)
+    _log(f"  Fetching descriptions via card click for {total} jobs...")
+
+    for i, row in enumerate(rows):
+        numeric_id = row["id"].replace("li-", "")
+        title = row.get("title") or row["id"]
+
+        card = page.query_selector(
+            f"div[role='button'][componentkey='job-card-component-ref-{numeric_id}']"
+        )
+        if not card:
+            _log(f"  [{i+1}/{total}] No card found: {title!r} — will fallback")
+            needs_fallback.append(row)
+            continue
+        try:
+            card.click()
+        except Exception:
+            _log(f"  [{i+1}/{total}] Click failed: {title!r} — will fallback")
+            needs_fallback.append(row)
+            continue
+
+        try:
+            page.wait_for_function(
+                """(id) => {
+                    const el = document.querySelector('#JobDetails_AboutTheJob_' + id);
+                    return !!el && el.innerText.trim().length > 50;
+                }""",
+                arg=numeric_id,
+                timeout=8000,
+            )
+        except Exception:
+            _log(f"  [{i+1}/{total}] Panel empty for {title!r} — will fallback")
+            needs_fallback.append(row)
+            continue
+
+        parts = [part.strip() for part in page.title().split("|")]
+        if len(parts) >= 2:
+            row["title"] = parts[0]
+            row["company"] = parts[1]
+
+        desc_el = page.query_selector(f"#JobDetails_AboutTheJob_{numeric_id}")
+        if desc_el:
+            row["description"] = desc_el.inner_text().strip()
+
+        if not row.get("description"):
+            _log(f"  [{i+1}/{total}] Panel empty for {title!r} — will fallback")
+            needs_fallback.append(row)
+        else:
+            _log(f"  [{i+1}/{total}] Got description via card click: {row.get('title', title)!r}")
+
+        page.wait_for_timeout(300)  # brief pause between card clicks
+
+    return needs_fallback
+
+
+def _find_pagination_control(page: Page, target_page: int):
+    """Find LinkedIn's own "Page N" control in the bottom pagination bar.
+
+    target_page is 1-indexed, matching the number shown on screen (unlike our
+    internal 0-indexed page_num)."""
+    for sel in (
+        f"li[data-test-pagination-page-btn='{target_page}'] button",
+        f"button[aria-label='Page {target_page}']",
+        f"a[aria-label='Page {target_page}']",
+    ):
+        el = page.query_selector(sel)
+        if el:
+            return el
+    return None
+
+
+def _goto_next_results_page(page: Page, target_page: int) -> bool:
+    """Advance to results page `target_page` (1-indexed) by clicking LinkedIn's
+    own bottom pagination control instead of constructing a `start=` URL
+    ourselves.
+
+    A hand-built `?start=N` URL doesn't carry whatever session state (e.g.
+    currentJobId) LinkedIn's own pagination click threads between pages —
+    without it, later "pages" were silently re-rendering page 1's results
+    instead of advancing. Returns False (caller should stop paginating) if no
+    control for that page number is found, e.g. fewer results than pages.
+    """
+    control = _find_pagination_control(page, target_page)
+    if not control:
+        return False
+    try:
+        control.scroll_into_view_if_needed()
+        control.click()
+    except Exception:
+        return False
+    _wait_for_job_results(page)
+
+    # LinkedIn's client-side pagination click can leave the list in a stale
+    # or partially-rendered state (see _wait_for_first_card_ready) — a full
+    # reload of the page it just navigated to (the click updates the URL's
+    # `start=` param via history.pushState) forces a clean server render of
+    # that page instead of relying on the in-place JS update.
+    try:
+        page.reload(wait_until="domcontentloaded")
+    except Exception:
+        pass
+    _wait_for_job_results(page)
+    _wait_for_first_card_ready(page)
+    return True
+
+
+def _scrape_pages(
     keywords: str,
     location: str,
     seconds: int,
+    num_pages: int,
     scroll_strategy: str = "incremental",
     keyword_mode: str = "structured",
+    on_page_done=None,
 ) -> list[dict]:
-    """Scrape one search-results page + fetch all descriptions.
-
-    Each call runs inside its own sync_playwright() so it is safe to call
-    from a thread — Playwright's sync API is not thread-safe to share.
+    """Scrape `num_pages` search-results pages + fetch all descriptions,
+    sequentially in one browser session — advancing page-to-page via
+    LinkedIn's own bottom pagination controls (see _goto_next_results_page)
+    rather than independently constructed `start=` URLs per page.
 
     keyword_mode:
     - "structured" (default): the usual /jobs/search/ page with separate
       keywords/location/f_TPR query params, as LinkedIn's own search form
-      submits them.
-    - "natural_language": LinkedIn's /jobs/search-results/ page instead —
-      a different endpoint, not just different params — with location and
-      the time window folded into one free-text keywords string (e.g.
-      "Staff Software Engineer in Bengaluru in last 72 hours") and the
-      location/f_TPR params omitted entirely. Debug-only, for comparing
-      against "structured"; not used by any production caller.
+      submits them. Cards are read via _extract_cards()/_scrape_job_cards()
+      (real <a href="/jobs/view/...">  per card) and descriptions fetched
+      via the right-side panel (_fetch_descriptions_via_panel()), falling
+      back to per-job navigation only when the panel doesn't load.
+    - "natural_language": LinkedIn's AI-powered /jobs/search-results/ page
+      instead, with location and the time window folded into one free-text
+      keywords string (e.g. "Staff Software Engineer in Bengaluru in last 72
+      hours") and the location/f_TPR params omitted entirely. Debug-only,
+      for comparing against "structured"; not used by any production
+      caller.
+
+      This UI's card markup is a completely different, obfuscated component
+      tree with no scrapable per-card text or links at all — the only
+      reliable signal is a `componentkey="job-card-component-ref-{id}"`
+      attribute (see _extract_semantic_cards()). So every row here starts
+      out id-only, and descriptions are fetched by clicking each card
+      in place (_fetch_descriptions_via_semantic_click() — ~7x faster than
+      full navigation), falling back to per-job navigation
+      (_fetch_job_description(), which fills in title/company from the job
+      page's own <title> tag) only for cards that approach couldn't fill in.
     """
     seen_ids: set[str] = set()
-    rows: list[dict] = []
+    all_rows: list[dict] = []
+    semantic = keyword_mode == "natural_language"
 
-    # Stagger parallel pages so `num_pages` browsers don't all launch and
-    # hit LinkedIn in the same instant — smooths out the burst that seemed
-    # to be tripping outright navigation failures under full parallelism.
-    if page_num:
-        time.sleep(page_num * 1.2)
-
-    _log(f"Page {page_num}: starting (offset={page_num * _JOBS_PER_PAGE})")
     with sync_playwright() as p:
         browser, context = _launch(p)
         pg = context.new_page()
         try:
-            if keyword_mode == "natural_language":
-                hours_old = seconds // 3600
+            if semantic:
                 base_url = "https://www.linkedin.com/jobs/search-results/"
-                query = {
-                    "keywords": f"{keywords} in {location} in last {hours_old} hours",
-                    "start":    page_num * _JOBS_PER_PAGE,
-                }
+                hours_old = seconds // 3600
+                query = {"keywords": f"{keywords} in {location} in last {hours_old} hours"}
             else:
                 base_url = "https://www.linkedin.com/jobs/search/"
-                query = {
-                    "keywords": keywords,
-                    "location": location,
-                    "f_TPR":    f"r{seconds}",
-                    "start":    page_num * _JOBS_PER_PAGE,
-                }
+                query = {"keywords": keywords, "location": location, "f_TPR": f"r{seconds}"}
             params = urlencode(query)
-            pg.goto(
-                f"{base_url}?{params}",
-                wait_until="domcontentloaded",
-            )
+            pg.goto(f"{base_url}?{params}", wait_until="domcontentloaded")
             _wait_for_job_results(pg)
+            _wait_for_first_card_ready(pg)
 
-            rows = _scrape_job_cards(pg, seen_ids, _JOBS_PER_PAGE, scroll_strategy)
-            if not rows:
-                # Job list can populate via a follow-up XHR after the
-                # initial paint — give it one more beat before giving up.
-                pg.wait_for_timeout(2000)
-                rows = _scrape_job_cards(pg, seen_ids, _JOBS_PER_PAGE, scroll_strategy)
-            _log(f"Page {page_num}: found {len(rows)} job cards")
+            for page_num in range(num_pages):
+                ui_page = page_num + 1
+                _log(f"Page {ui_page}: starting")
 
-            if rows:
-                needs_fallback = _fetch_descriptions_via_panel(pg, rows)
-                if needs_fallback:
-                    _log(f"Page {page_num}: {len(needs_fallback)} jobs need fallback nav")
-                for row in needs_fallback:
-                    _fetch_job_description(pg, row)
+                if semantic:
+                    rows = _extract_semantic_cards(pg, seen_ids, _JOBS_PER_PAGE)
+                    if not rows:
+                        pg.wait_for_timeout(2000)
+                        rows = _extract_semantic_cards(pg, seen_ids, _JOBS_PER_PAGE)
+                else:
+                    rows = _scrape_job_cards(pg, seen_ids, _JOBS_PER_PAGE, scroll_strategy)
+                    if not rows:
+                        # Job list can populate via a follow-up XHR after the
+                        # initial paint — give it one more beat before giving up.
+                        pg.wait_for_timeout(2000)
+                        rows = _scrape_job_cards(pg, seen_ids, _JOBS_PER_PAGE, scroll_strategy)
+                _log(f"Page {ui_page}: found {len(rows)} job cards")
+
+                if rows:
+                    # Fallback nav navigates pg away from the results list —
+                    # save the URL LinkedIn's own pagination put us on so we
+                    # can return to this exact page before advancing further.
+                    results_url = pg.url
+                    needs_fallback = (
+                        _fetch_descriptions_via_semantic_click(pg, rows) if semantic
+                        else _fetch_descriptions_via_panel(pg, rows)
+                    )
+                    if needs_fallback:
+                        _log(f"Page {ui_page}: {len(needs_fallback)} jobs need fallback nav")
+                        for row in needs_fallback:
+                            _fetch_job_description(pg, row)
+                        pg.goto(results_url, wait_until="domcontentloaded")
+                        _wait_for_job_results(pg)
+
+                all_rows.extend(rows)
+                _log(f"Page {ui_page}: done — {len(rows)} jobs with descriptions")
+                if on_page_done:
+                    on_page_done(ui_page, num_pages, len(all_rows))
+
+                if page_num < num_pages - 1:
+                    next_page = ui_page + 1
+                    if not _goto_next_results_page(pg, next_page):
+                        _log(f"Page {next_page}: no pagination link found — stopping early")
+                        break
+
+            _save_session(context)
         finally:
             browser.close()
 
-    _log(f"Page {page_num}: done — {len(rows)} jobs with descriptions")
-    return rows
+    return all_rows
 
 
 def search_jobs(
@@ -911,11 +1201,13 @@ def search_jobs(
 ) -> pd.DataFrame:
     """Scrape LinkedIn Jobs while logged in. Returns DataFrame matching jobspy schema.
 
-    Runs up to 4 search pages in parallel threads (one Playwright instance per thread),
-    then deduplicates and trims to results_wanted.
+    Scrapes up to 4 search-results pages sequentially in one browser session,
+    advancing via LinkedIn's own bottom pagination controls (see
+    _goto_next_results_page) rather than independently constructed `start=`
+    URLs per page, then deduplicates and trims to results_wanted.
 
-    on_page_done(pages_done, total_pages, jobs_so_far) is called from the main thread
-    after each page completes — safe to use for Streamlit UI updates.
+    on_page_done(pages_done, total_pages, jobs_so_far) is called after each
+    page completes — safe to use for Streamlit UI updates.
 
     num_pages overrides the results_wanted-derived page count entirely (no _MIN_PAGES/
     _MAX_PAGES clamping) — for debugging/testing an exact page count only; production
@@ -925,7 +1217,7 @@ def search_jobs(
     docstring. Production callers should leave this at the default "incremental";
     "all_first" exists only for debug_linkedin_scan.py's A/B comparison.
 
-    keyword_mode is passed straight through to _scrape_one_page() — see its
+    keyword_mode is passed straight through to _scrape_pages() — see its
     docstring. Production callers should leave this at the default "structured";
     "natural_language" exists only for debug_linkedin_scan.py's A/B comparison.
     """
@@ -935,67 +1227,24 @@ def search_jobs(
                          (results_wanted + _JOBS_PER_PAGE - 1) // _JOBS_PER_PAGE))
 
     _log(f"Searching LinkedIn: {keywords!r} in {location!r} | "
-         f"{hours_old}h window | {num_pages} page(s) in parallel")
+         f"{hours_old}h window | {num_pages} page(s)")
 
+    seen_ids: set[str] = set()
     all_rows: list[dict] = []
-    seen_ids: set[str]   = set()
-    pages_done = 0
 
-    # set_log_fn() (used by the Streamlit UI) may route _log() into an
-    # st.empty() placeholder, which requires Streamlit's ScriptRunContext —
-    # thread-local and normally only attached to the main script thread.
-    # _scrape_one_page runs in ThreadPoolExecutor worker threads, so without
-    # explicitly propagating the calling thread's context, any _log() call
-    # from a worker raises NoSessionContext. Lazily imported and guarded so
-    # CLI callers (main.py, cron_scan.py — no Streamlit runtime) are
-    # unaffected: get_script_run_ctx() just returns None there.
     try:
-        from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
-        _st_ctx = get_script_run_ctx()
-    except ImportError:
-        add_script_run_ctx = None
-        _st_ctx = None
-
-    def _run_page(page_num: int) -> list[dict]:
-        if add_script_run_ctx is not None:
-            add_script_run_ctx(threading.current_thread(), _st_ctx)
-        return _scrape_one_page(page_num, keywords, location, seconds, scroll_strategy, keyword_mode)
-
-    # Not a `with` block on purpose: exiting `with ThreadPoolExecutor()` calls
-    # shutdown(wait=True), which blocks a KeyboardInterrupt/exception unwind
-    # until every in-flight page scrape finishes — see the same pattern (and
-    # rationale) in scanner/llm/raw_scoring.py's batch-scoring pool.
-    pool = ThreadPoolExecutor(max_workers=min(num_pages, _MAX_PARALLEL_WORKERS))
-    try:
-        futures = {
-            pool.submit(_run_page, pn): pn
-            for pn in range(num_pages)
-        }
-        for future in as_completed(futures):
-            pn = futures[future]
-            pages_done += 1
-            try:
-                page_rows = future.result()
-                before = len(all_rows)
-                for row in page_rows:
-                    if row["id"] not in seen_ids:
-                        seen_ids.add(row["id"])
-                        all_rows.append(row)
-                added = len(all_rows) - before
-                _log(f"Page {pn} merged: +{added} unique jobs (total so far: {len(all_rows)})")
-            except Exception as exc:
-                detail = f"{type(exc).__name__}: {exc!r}"
-                warnings.warn(f"Search page {pn} failed: {detail}")
-                _log(f"Page {pn} FAILED: {detail}")
-            if on_page_done:
-                on_page_done(pages_done, num_pages, len(all_rows))
-    finally:
-        pool.shutdown(wait=False, cancel_futures=True)
-
-    with sync_playwright() as p:
-        browser, context = _launch(p)
-        _save_session(context)
-        browser.close()
+        page_rows = _scrape_pages(
+            keywords, location, seconds, num_pages, scroll_strategy, keyword_mode,
+            on_page_done=on_page_done,
+        )
+        for row in page_rows:
+            if row["id"] not in seen_ids:
+                seen_ids.add(row["id"])
+                all_rows.append(row)
+    except Exception as exc:
+        detail = f"{type(exc).__name__}: {exc!r}"
+        warnings.warn(f"Search failed: {detail}")
+        _log(f"Search FAILED: {detail}")
 
     # Not trimmed to results_wanted: num_pages already guarantees at least
     # _MIN_PAGES pages are fetched, so returning everything found (rather than
