@@ -70,7 +70,13 @@ WHERE id NOT IN (
 """
 
 
-def _connect() -> sqlite3.Connection:
+def connect() -> sqlite3.Connection:
+    """Open the shared database, creating/migrating the jobs+referrals tables.
+
+    Public because scanner.profile builds its own tables on top of the same
+    file and needs a way in that isn't a private name. Reads DB_PATH at call
+    time, which is what lets tests repoint it (see the isolated_db fixture).
+    """
     DB_PATH.parent.mkdir(exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.execute(_CREATE_TABLE)
@@ -110,6 +116,11 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
+#: Long-standing internal alias for connect(), kept so existing callers
+#: (and tests that patch around it) keep working.
+_connect = connect
+
+
 def _dedup_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     """Drop exact-ID duplicates within a single batch, keeping first occurrence."""
     return df.drop_duplicates(subset=["id"], keep="first")
@@ -143,65 +154,88 @@ def content_hash(description: str | None) -> str | None:
     return hashlib.sha256(text.encode()).hexdigest()[:12]
 
 
-def save_jobs(df: pd.DataFrame, default_status: str = "new") -> int:  # noqa: C901
-    """Insert new jobs, skipping rows that duplicate an existing job's
-    normalized (title, company) pair, OR its content_hash (sha256 of the
-    description — see content_hash()), under a different id — e.g. the same
-    role scraped from LinkedIn and mirrored on its Greenhouse/Lever board,
-    or the same posting under a differently-cased title across sources.
-    Returns the number of genuinely new rows inserted.
+class _CanonicalIndex:
+    """Which already-known job, if any, an incoming row is a re-sighting of.
 
-    `default_status` is the status a genuinely new row is inserted with
-    (e.g. "shortlisted" for jobs added by hand via add_job_by_url, vs. the
-    "new" default for scan-sourced jobs) — it has no effect on rows that
-    upsert against an existing id, since status is never overwritten there.
+    Holds the three lookups that have to move together: known ids, the
+    (title, company) key, and the content_hash. `remember()` updating all of
+    them is what makes within-batch dedup work — two sources in one save_jobs()
+    call can't both insert the same role, because the first one registers itself
+    here before the second is classified.
 
-    Rules:
-    - status and first_seen are never overwritten on same-id upserts.
-    - A same-id row upserts normally (existing behavior).
-    - A row whose content_hash OR (title, company) matches an existing
-      DIFFERENT id is a re-sighting of that job (hash checked first):
-      last_seen is bumped and job_url_direct is backfilled if the canonical
-      row didn't have one yet. No new row is created.
-    - The same rule applies within a single incoming batch, so combining
-      multiple sources in one save_jobs() call can't create duplicates.
+    Values are (canonical_id, that row's current job_url_direct).
     """
-    if df.empty or "id" not in df.columns:
-        return 0
 
-    df = _dedup_dataframe(df)
+    def __init__(self, rows):
+        self.ids = {row[0] for row in rows}
+        self.by_title_company = {_norm_key(row[1], row[2]): (row[0], row[3]) for row in rows}
+        self.by_hash = {row[4]: (row[0], row[3]) for row in rows if row[4]}
 
-    cols = [c for c in _STORE_COLS if c in df.columns]
+    def knows_id(self, job_id) -> bool:
+        return job_id in self.ids
+
+    def find(self, row_hash, key):
+        """The canonical row this duplicates, or None if it's genuinely new.
+
+        content_hash is checked first: it catches the same posting mirrored
+        across sources under a differently-worded title, which the (title,
+        company) key would miss.
+        """
+        if row_hash:
+            found = self.by_hash.get(row_hash)
+            if found is not None:
+                return found
+        return self.by_title_company.get(key)
+
+    def remember(self, job_id, key, row_hash, job_url_direct) -> None:
+        self.ids.add(job_id)
+        self.by_title_company[key] = (job_id, job_url_direct)
+        if row_hash:
+            self.by_hash[row_hash] = (job_id, job_url_direct)
+
+
+def _correct_remote_flag(subset: pd.DataFrame) -> pd.DataFrame:
+    """Distrust a source's is_remote when the location names a real place.
+
+    Sources (jobspy in particular) often derive is_remote by keyword-matching
+    "remote" anywhere in the description — including hybrid mentions like
+    "remote work on Fridays" — which wrongly flags office-bound jobs as fully
+    remote. A specific location is the more reliable signal.
+    """
+    if "is_remote" not in subset.columns or "location" not in subset.columns:
+        return subset
+
+    def _correct(row):
+        loc = (row["location"] or "").strip().lower()
+        if row["is_remote"] and loc and "remote" not in loc:
+            return 0
+        return row["is_remote"]
+
+    subset["is_remote"] = subset.apply(_correct, axis=1)
+    return subset
+
+
+def _normalize_for_storage(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+    """Coerce a scraped frame into what SQLite will accept."""
     subset = df[cols].copy()
-
-    # NaN → None so sqlite3 stores NULL, not the string 'nan'
+    # NaN -> None so sqlite3 stores NULL, not the string 'nan'.
     subset = subset.where(subset.notna(), None)
-
-    # bool → int (SQLite has no native bool)
+    # bool -> int (SQLite has no native bool).
     if "is_remote" in subset.columns:
         subset["is_remote"] = subset["is_remote"].apply(
             lambda x: int(x) if x is not None else None
         )
+    return _correct_remote_flag(subset)
 
-    # Sources (jobspy in particular) often derive is_remote by keyword-matching
-    # "remote" anywhere in the description — including hybrid-schedule mentions
-    # like "remote work on Fridays" — which wrongly flags jobs tied to a real
-    # office location as fully remote. The location field is the more reliable
-    # signal: if it names a specific place (not blank, not itself "remote"),
-    # trust that over a source's own is_remote guess.
-    if "is_remote" in subset.columns and "location" in subset.columns:
-        def _correct_remote(row):
-            loc = (row["location"] or "").strip().lower()
-            if row["is_remote"] and loc and "remote" not in loc:
-                return 0
-            return row["is_remote"]
-        subset["is_remote"] = subset.apply(_correct_remote, axis=1)
 
-    # NULLIF/COALESCE: a re-scrape that comes back with a blank/NULL field
-    # (e.g. jobspy's per-job description fetch failing transiently) must not
-    # clobber a previously-populated value — keep the old value in that case.
-    # content_hash is derived (computed per-row below), not sourced from the
-    # incoming DataFrame like the _STORE_COLS columns — appended separately.
+def _build_upsert_sql(cols: list[str]) -> tuple[str, list[str]]:
+    """The INSERT .. ON CONFLICT(id) DO UPDATE used for same-id rows.
+
+    NULLIF/COALESCE means a re-scrape that comes back with a blank field (e.g. a
+    transiently failed description fetch) keeps the previously-stored value
+    instead of clobbering it. status and first_seen are never in the update
+    clause, so a user's own tracking survives every re-scan.
+    """
     upsert_cols = cols + ["content_hash", "status"]
     update_clause = ", ".join(
         f"{c} = COALESCE(NULLIF(excluded.{c}, ''), {c})"
@@ -210,69 +244,88 @@ def save_jobs(df: pd.DataFrame, default_status: str = "new") -> int:  # noqa: C9
     ) + ", content_hash = COALESCE(NULLIF(excluded.content_hash, ''), content_hash)" \
         ", last_seen = datetime('now')"
 
-    col_names = ", ".join(upsert_cols)
-    placeholders = ", ".join("?" * len(upsert_cols))
-
-    upsert_sql = f"""
-        INSERT INTO jobs ({col_names}, last_seen)
-        VALUES ({placeholders}, datetime('now'))
+    sql = f"""
+        INSERT INTO jobs ({", ".join(upsert_cols)}, last_seen)
+        VALUES ({", ".join("?" * len(upsert_cols))}, datetime('now'))
         ON CONFLICT(id) DO UPDATE SET {update_clause}
     """
+    return sql, upsert_cols
+
+
+def _record_resighting(conn, canonical_id, new_direct) -> None:
+    """Bump an existing job's last_seen, backfilling job_url_direct if it had none."""
+    if new_direct:
+        conn.execute(
+            "UPDATE jobs SET last_seen = datetime('now'), "
+            "job_url_direct = COALESCE(NULLIF(job_url_direct, ''), ?) WHERE id = ?",
+            (new_direct, canonical_id),
+        )
+    else:
+        conn.execute("UPDATE jobs SET last_seen = datetime('now') WHERE id = ?", (canonical_id,))
+
+
+def save_jobs(df: pd.DataFrame, default_status: str = "new") -> int:
+    """Insert new jobs, treating duplicates of an existing job as re-sightings.
+
+    A row duplicates an existing job when it matches that job's content_hash, or
+    its normalized (title, company) pair, under a *different* id — e.g. the same
+    role scraped from LinkedIn and mirrored on its Greenhouse board. Returns the
+    number of genuinely new rows inserted.
+
+    `default_status` is the status a genuinely new row gets (e.g. "shortlisted"
+    for jobs added by hand via add_job_by_url, vs "new" for scanned ones). It has
+    no effect on same-id upserts, where status is never overwritten.
+
+    Rules:
+    - status and first_seen are never overwritten on same-id upserts.
+    - A same-id row upserts normally.
+    - A row matching a DIFFERENT existing id is a re-sighting: last_seen is
+      bumped, job_url_direct backfilled if the canonical row lacked one, and no
+      new row is created.
+    - The same rule applies within one incoming batch — see _CanonicalIndex.
+    """
+    if df.empty or "id" not in df.columns:
+        return 0
+
+    cols = [c for c in _STORE_COLS if c in df.columns]
+    subset = _normalize_for_storage(_dedup_dataframe(df), cols)
+    upsert_sql, _ = _build_upsert_sql(cols)
 
     with _connect() as conn:
-        existing = conn.execute(
+        index = _CanonicalIndex(conn.execute(
             "SELECT id, title, company, job_url_direct, content_hash FROM jobs"
-        ).fetchall()
-        existing_ids = {row[0] for row in existing}
-        # key -> (canonical_id, current job_url_direct)
-        canonical = {_norm_key(row[1], row[2]): (row[0], row[3]) for row in existing}
-        canonical_by_hash = {row[4]: (row[0], row[3]) for row in existing if row[4]}
+        ).fetchall())
 
         to_upsert: list[list] = []
-        backfill: list[tuple] = []  # (new_job_url_direct_or_None, canonical_id)
+        resightings: list[tuple] = []   # (canonical_id, incoming job_url_direct or None)
         new_count = 0
 
-        for _, row in subset.iterrows():
-            row = row.to_dict()
-            rid = row["id"]
+        for _, raw in subset.iterrows():
+            row = raw.to_dict()
+            row_id = row["id"]
             row_hash = content_hash(row.get("description"))
+            values = [row[c] for c in cols] + [row_hash, default_status]
 
-            if rid in existing_ids:
-                to_upsert.append([row[c] for c in cols] + [row_hash, default_status])
+            if index.knows_id(row_id):
+                to_upsert.append(values)
                 continue
 
-            canon = canonical_by_hash.get(row_hash) if row_hash else None
             key = _norm_key(row.get("title"), row.get("company"))
-            if canon is None:
-                canon = canonical.get(key)
-            if canon is not None:
-                canon_id, canon_direct = canon
-                new_direct = row.get("job_url_direct")
-                backfill.append((new_direct if not canon_direct else None, canon_id))
+            canonical = index.find(row_hash, key)
+            if canonical is not None:
+                canonical_id, canonical_direct = canonical
+                incoming_direct = row.get("job_url_direct")
+                resightings.append((canonical_id, None if canonical_direct else incoming_direct))
                 continue
 
-            to_upsert.append([row[c] for c in cols] + [row_hash, default_status])
+            to_upsert.append(values)
             new_count += 1
-            canonical[key] = (rid, row.get("job_url_direct"))
-            if row_hash:
-                canonical_by_hash[row_hash] = (rid, row.get("job_url_direct"))
-            existing_ids.add(rid)
+            index.remember(row_id, key, row_hash, row.get("job_url_direct"))
 
         if to_upsert:
             conn.executemany(upsert_sql, to_upsert)
-        for new_direct, canon_id in backfill:
-            if new_direct:
-                conn.execute(
-                    "UPDATE jobs SET last_seen = datetime('now'), "
-                    "job_url_direct = COALESCE(NULLIF(job_url_direct, ''), ?) "
-                    "WHERE id = ?",
-                    (new_direct, canon_id),
-                )
-            else:
-                conn.execute(
-                    "UPDATE jobs SET last_seen = datetime('now') WHERE id = ?",
-                    (canon_id,),
-                )
+        for canonical_id, new_direct in resightings:
+            _record_resighting(conn, canonical_id, new_direct)
 
     return new_count
 

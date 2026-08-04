@@ -118,3 +118,56 @@ def launch_stealth_browser(
     context = browser.new_context(**ctx_kwargs)
     context.add_init_script(stealth_script)
     return browser, context
+
+
+class SessionBrowser:
+    """Launch config for one site, bound to where that site's session is saved.
+
+    `linkedin_playwright`, `naukri_playwright` and `apply` each had their own
+    `_launch()` (and two had their own `_save_session()`) wrapping the single
+    `launch_stealth_browser()` below. They agreed on everything that matters —
+    resolve `headless=None` from SCAN_DEBUG_HEADFUL, load the saved session if
+    the file exists — and differed only in viewport, timezone and stealth
+    options, which are constructor arguments here.
+    """
+
+    def __init__(self, session_file, *, viewport=None, timezone_id=None,
+                 stealth_script=None, try_real_chrome=True):
+        self.session_file = session_file
+        self.viewport = viewport or {"width": 1280, "height": 800}
+        self.timezone_id = timezone_id
+        self.stealth_script = stealth_script
+        self.try_real_chrome = try_real_chrome
+
+    def has_session(self) -> bool:
+        return self.session_file is not None and self.session_file.exists()
+
+    def launch(self, p, *, headless: bool | None = None, load_session: bool = True):
+        """Launch a browser + context for this site.
+
+        `headless=None` (the default at every scan call site) resolves to
+        `not debug_headful()`, so setting SCAN_DEBUG_HEADFUL=1 in .env makes
+        scan browsers launch visibly. Callers with a hard requirement — login()
+        is always headed — pass `headless` explicitly and are unaffected.
+        """
+        if headless is None:
+            headless = not debug_headful()
+        kwargs = {
+            "headless": headless,
+            "storage_state_path": str(self.session_file) if (load_session and self.has_session()) else None,
+            "viewport": self.viewport,
+            # Always passed explicitly: if this were only forwarded when true,
+            # try_real_chrome=False could never actually disable it, since
+            # launch_stealth_browser's own default is True.
+            "try_real_chrome": self.try_real_chrome,
+        }
+        if self.timezone_id:
+            kwargs["timezone_id"] = self.timezone_id
+        if self.stealth_script:
+            kwargs["stealth_script"] = self.stealth_script
+        return launch_stealth_browser(p, **kwargs)
+
+    def save(self, context) -> None:
+        """Persist cookies/localStorage so the next run skips the login flow."""
+        self.session_file.parent.mkdir(parents=True, exist_ok=True)
+        context.storage_state(path=str(self.session_file))

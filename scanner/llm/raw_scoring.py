@@ -3,7 +3,6 @@ import threading
 import time
 import warnings
 from collections.abc import Iterator
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
 from instructor.core import IncompleteOutputException
 
@@ -11,6 +10,7 @@ from . import (
     BATCH_SIZE, BatchScoreResult, EmptyScoringResultError, _provider,
     _raw_completion_text, observe, scoring_breaker_status,
 )
+from ._batch import breaker_is_open, run_batches
 from ._prompt_loader import load_prompt_file
 
 # Prompt text lives in scanner/llm/prompts/raw_scoring.json (versioned per
@@ -275,10 +275,7 @@ def score_jobs(summary: str, jobs: list[dict], log_fn=None,
         if log_fn:
             log_fn(msg)
 
-    breaker = scoring_breaker_status()
-    if breaker["open"]:
-        _log(f"Scoring unavailable — model in cooldown for ~{breaker['retry_in_s']}s "
-             f"({breaker['reason']}).")
+    if breaker_is_open(scoring_breaker_status(), log_fn, "Scoring"):
         return
 
     _log(f"{len(jobs)} job(s) split into {len(batches)} batch(es) "
@@ -286,49 +283,11 @@ def score_jobs(summary: str, jobs: list[dict], log_fn=None,
 
     _llm._warm_up_litellm(_provider())
 
-    # Not a `with` block on purpose: exiting `with ThreadPoolExecutor()` calls
-    # shutdown(wait=True), which blocks until every in-flight batch finishes —
-    # defeating cancellation entirely (this function wouldn't return until
-    # all batches were done regardless). Managing the pool manually lets the
-    # cancelled path shut down without waiting for already-running batches.
-    pool = ThreadPoolExecutor(max_workers=min(BATCH_SIZE, len(batches)))
-    try:
-        futures = {
-            pool.submit(_llm._score_batch, summary, batch, log_fn,
-                        f"[Batch {i}/{len(batches)}] ", cancel_event): batch
-            for i, batch in enumerate(batches, start=1)
-        }
-        pending = set(futures)
-        while pending:
-            if cancel_event is not None and cancel_event.is_set():
-                _log("Cancelled — stopping (any already-running batches finish in the "
-                     "background, but their results are discarded).")
-                break
-            # wait() with a short timeout (rather than as_completed(), which only
-            # returns control to this loop once a future actually finishes) is
-            # what makes the cancel_event check above actually prompt — with
-            # every batch already running and none done yet, as_completed()
-            # would otherwise block for however long the slowest one takes
-            # before this loop got a chance to notice cancellation at all.
-            done, pending = wait(pending, timeout=1.0, return_when=FIRST_COMPLETED)
-            for future in done:
-                batch = futures[future]
-                try:
-                    yield future.result()
-                except EmptyScoringResultError as e:
-                    # Fatal for the whole run, not just this batch — see
-                    # EmptyScoringResultError's docstring. Re-raising here
-                    # propagates out of this generator (and the finally
-                    # below still cancels/discards any other pending
-                    # batches), stopping score_unscored_jobs() entirely
-                    # instead of silently under-scoring the rest of the run.
-                    _log(f"Batch scoring returned empty — stopping the run: {e}")
-                    raise
-                except Exception as e:
-                    _log(f"Batch scoring failed ({len(batch)} job(s)): {e}")
-                    warnings.warn(f"Batch scoring failed ({len(batch)} job(s)): {e}")
-                    yield []
-    finally:
-        # cancel_futures=True drops any not-yet-started batch immediately;
-        # wait=False means we don't block on ones already running.
-        pool.shutdown(wait=False, cancel_futures=True)
+    def _submit(pool, batch, i, total):
+        # _llm._score_batch, not the module-level name: resolved at call time so
+        # tests patching it on the package object are observed. See _score_batch's
+        # own comment for the full rationale.
+        return pool.submit(_llm._score_batch, summary, batch, log_fn,
+                            f"[Batch {i}/{total}] ", cancel_event)
+
+    yield from run_batches(batches, _submit, log_fn, cancel_event, label="Batch scoring")
