@@ -105,24 +105,11 @@ if not os.getenv("LANGFUSE_HOST") and os.getenv("LANGFUSE_BASE_URL"):
 # spans over OTLP/HTTP straight to Langfuse's OTel ingestion endpoint
 # (LANGFUSE_HOST + "/api/public/otel") and never touches the langfuse
 # package's Python API, so it isn't exposed to that SDK-version drift.
-try:
-    from langfuse import observe
-    _LF_AVAILABLE = True
-except ImportError:
-    _LF_AVAILABLE = False
+from ._breaker import BREAKER, is_rate_limit_error as _is_rate_limit_error  # noqa: E402
+from ._tracing import install_callbacks, is_tracing, observe  # noqa: E402
 
-    def observe(_fn=None, **_kw):       # no-op decorator when langfuse not installed
-        def _wrap(fn): return fn
-        return _wrap(_fn) if _fn else _wrap
-
-
-def _is_tracing() -> bool:
-    return _LF_AVAILABLE and bool(os.getenv("LANGFUSE_SECRET_KEY"))
-
-
-if _is_tracing():
-    litellm.success_callback = ["langfuse_otel"]
-    litellm.failure_callback = ["langfuse_otel"]
+_is_tracing = is_tracing          # kept: referenced by name elsewhere in this module
+install_callbacks()
 
 
 _PROVIDER_CONFIG = {
@@ -141,21 +128,8 @@ _PROVIDER_CONFIG = {
     },
 }
 
-_breaker_lock = threading.Lock()
-_breaker_states = {
-    "claude": {"consecutive_failures": 0, "open_until": 0.0, "last_error": ""},
-    "gemini": {"consecutive_failures": 0, "open_until": 0.0, "last_error": ""},
-}
-
-
 def _is_provider_rate_limited(provider: str) -> bool:
-    with _breaker_lock:
-        state = _breaker_states.get(provider)
-        if state:
-            open_until = state.get("open_until", 0.0)
-            if open_until and time.time() < open_until:
-                return True
-        return False
+    return BREAKER.is_open(provider)
 
 
 def _provider() -> str:
@@ -432,72 +406,24 @@ def _model_class_override(provider: str, model_class: str | None) -> str | None:
 # skipped outright (no API call attempted) until the cooldown window passes.
 # A single success closes the breaker again immediately.
 
-_BREAKER_FAILURE_THRESHOLD = 2      # consecutive rate-limit failures before tripping
-_BREAKER_COOLDOWN_S        = 300    # 5 minutes
-
-
-def _is_rate_limit_error(exc: Exception) -> bool:
-    """Best-effort detection of a rate-limit/overload/cooldown-style failure,
-    as opposed to e.g. a validation error or a one-off timeout. litellm's
-    exceptions (litellm.RateLimitError etc.) already subclass the equivalent
-    openai exception, but check litellm's directly rather than lean on that
-    inheritance detail. status_code is checked via getattr rather than an
-    isinstance(..., APIStatusError) class check, since it's present on both
-    openai's and litellm's exception hierarchies."""
-    if isinstance(exc, litellm.RateLimitError):
-        return True
-    if getattr(exc, "status_code", None) in (429, 503, 529):
-        return True
-    msg = str(exc).lower()
-    return any(kw in msg for kw in (
-        "rate limit", "rate_limit", "cooldown", "cool down", "overloaded",
-        "too many requests", "429", "503", "529",
-    ))
-
-
 def _breaker_record_failure(provider: str, exc: Exception) -> None:
-    if not _is_rate_limit_error(exc):
-        return  # other failure kinds (bad JSON, one-off timeout) don't trip the breaker
-    with _breaker_lock:
-        state = _breaker_states.setdefault(provider, {"consecutive_failures": 0, "open_until": 0.0, "last_error": ""})
-        state["consecutive_failures"] += 1
-        state["last_error"] = str(exc)
-        if state["consecutive_failures"] >= _BREAKER_FAILURE_THRESHOLD:
-            state["open_until"] = time.time() + _BREAKER_COOLDOWN_S
+    BREAKER.record_failure(provider, exc)
 
 
 def _breaker_record_success(provider: str) -> None:
-    with _breaker_lock:
-        state = _breaker_states.setdefault(provider, {"consecutive_failures": 0, "open_until": 0.0, "last_error": ""})
-        state["consecutive_failures"] = 0
-        state["open_until"] = 0.0
+    BREAKER.record_success(provider)
 
 
 def provider_breaker_status(provider: str) -> dict:
-    """Check the breaker status for a specific provider. Returns
-    {"open": bool, "retry_at": float|None, "retry_in_s": int|None, "reason": str}
-    """
-    with _breaker_lock:
-        state = _breaker_states.get(provider, {"consecutive_failures": 0, "open_until": 0.0, "last_error": ""})
-        open_until = state["open_until"]
-        if open_until and time.time() < open_until:
-            return {
-                "open": True,
-                "retry_at": open_until,
-                "retry_in_s": int(open_until - time.time()),
-                "reason": state["last_error"],
-            }
-        return {"open": False, "retry_at": None, "retry_in_s": None, "reason": ""}
+    """Breaker status for one provider — see CircuitBreaker.status()."""
+    return BREAKER.status(provider)
 
 
 def scoring_breaker_status() -> dict:
-    """Check before attempting to score. Returns
-    {"open": bool, "retry_at": float|None, "retry_in_s": int|None, "reason": str}
-    so callers (e.g. the UI) can show "scoring not available" instead of
-    trying and failing against a model that's still in cooldown.
-    """
-    provider = _provider()
-    return provider_breaker_status(provider)
+    """Breaker status for whichever provider a scoring call would use, so callers
+    (e.g. the UI) can show "scoring not available" instead of trying and failing
+    against a model that is still in cooldown."""
+    return provider_breaker_status(_provider())
 
 
 def _client_and_model(provider: str, is_instructor: bool, model_override: str | None = None):
@@ -552,7 +478,10 @@ def execute_with_breaker(query_fn, is_instructor=False, log_fn=None, model_class
     if breaker["open"]:
         if log_fn:
             log_fn(f"Skipped — {provider} in cooldown for ~{breaker['retry_in_s']}s.")
-        raise RuntimeError(f"LLM unavailable — {provider} in cooldown (~{breaker['retry_in_s']}s remaining): {breaker['reason']}")
+        raise RuntimeError(
+            f"LLM unavailable — {provider} in cooldown "
+            f"(~{breaker['retry_in_s']}s remaining): {breaker['reason']}"
+        )
 
     pref_provider = os.getenv("LLM_PROVIDER", "claude").lower()
     if pref_provider == "claude" and provider == "gemini" and log_fn:

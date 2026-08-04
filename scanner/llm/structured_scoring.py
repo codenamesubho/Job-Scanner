@@ -1,9 +1,7 @@
 import json
 import threading
 import time
-import warnings
 from collections.abc import Iterator
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import Literal
 
 from instructor.core import IncompleteOutputException
@@ -14,6 +12,7 @@ from . import (
     observe,
 )
 from .extraction import ResumeProfile
+from ._batch import breaker_is_open, run_batches
 from ._prompt_loader import load_prompt_file
 
 # Parallel implementation to score_jobs()/_score_batch() in raw_scoring.py,
@@ -452,10 +451,7 @@ def score_jobs_structured(resume_profile: ResumeProfile, jobs: list[dict], log_f
         if log_fn:
             log_fn(msg)
 
-    breaker = _llm.scoring_breaker_status()
-    if breaker["open"]:
-        _log(f"Structured scoring unavailable — model in cooldown for ~{breaker['retry_in_s']}s "
-             f"({breaker['reason']}).")
+    if breaker_is_open(_llm.scoring_breaker_status(), log_fn, "Structured scoring"):
         return
 
     resume_dict = resume_profile.model_dump()
@@ -465,32 +461,11 @@ def score_jobs_structured(resume_profile: ResumeProfile, jobs: list[dict], log_f
 
     _llm._warm_up_litellm(_provider())
 
-    pool = ThreadPoolExecutor(max_workers=min(BATCH_SIZE, len(batches)))
-    try:
-        futures = {
-            pool.submit(_llm._score_structured_batch, resume_json, resume_dict, batch, log_fn,
-                        f"[Batch {i}/{len(batches)}] ", cancel_event): batch
-            for i, batch in enumerate(batches, start=1)
-        }
-        pending = set(futures)
-        while pending:
-            if cancel_event is not None and cancel_event.is_set():
-                _log("Cancelled — stopping (any already-running batches finish in the "
-                     "background, but their results are discarded).")
-                break
-            done, pending = wait(pending, timeout=1.0, return_when=FIRST_COMPLETED)
-            for future in done:
-                batch = futures[future]
-                try:
-                    yield future.result()
-                except EmptyScoringResultError as e:
-                    # Fatal for the whole run — see EmptyScoringResultError's
-                    # docstring and the matching handling in score_jobs().
-                    _log(f"Structured batch scoring returned empty — stopping the run: {e}")
-                    raise
-                except Exception as e:
-                    _log(f"Structured batch scoring failed ({len(batch)} job(s)): {e}")
-                    warnings.warn(f"Structured batch scoring failed ({len(batch)} job(s)): {e}")
-                    yield []
-    finally:
-        pool.shutdown(wait=False, cancel_futures=True)
+    def _submit(pool, batch, i, total):
+        # Resolved at call time off the package object — see _score_structured_batch's
+        # comment: the tests patch this name there.
+        return pool.submit(_llm._score_structured_batch, resume_json, resume_dict, batch,
+                            log_fn, f"[Batch {i}/{total}] ", cancel_event)
+
+    yield from run_batches(batches, _submit, log_fn, cancel_event,
+                            label="Structured batch scoring")

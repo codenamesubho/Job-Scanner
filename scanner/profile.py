@@ -113,7 +113,8 @@ def save_candidate(name: str, email: str, phone: str, linkedin: str,
                    resume_extracted: str | None = None) -> None:
     with _connect() as conn:
         conn.execute("""
-            INSERT INTO candidate (id, name, email, phone, linkedin, title, years_exp, summary, resume_extracted, updated_at)
+            INSERT INTO candidate (id, name, email, phone, linkedin, title,
+                                    years_exp, summary, resume_extracted, updated_at)
             VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
             ON CONFLICT(id) DO UPDATE SET
                 name       = excluded.name,

@@ -3,7 +3,7 @@
 # does not require a tree-wide reformat in the same commit. Tighten rule-by-rule as
 # the refactor phases land — each rule below records why it is off and what it costs.
 target-version = "py310"
-line-length = 110
+line-length = 120
 
 [lint]
 select = ["E", "F", "UP", "B"]
@@ -11,7 +11,6 @@ select = ["E", "F", "UP", "B"]
 # in 26 files, which is pure churn that would bury real changes in review. Turn it on
 # in its own dedicated commit.
 ignore = [
-    "E501",  # line length: long selector strings and prompts make this noisy here
     "E701",  # multiple statements on one line: 3 hits, all terse guard clauses
     "B008",  # function call in default arg: argparse/Path defaults rely on this
     "B028",  # warnings.warn without stacklevel: 5 hits, all user-facing scrape warnings

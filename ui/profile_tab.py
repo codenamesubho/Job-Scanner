@@ -122,7 +122,8 @@ def _render_resume_section() -> None:
         except Exception as e:
             st.success(f"Resume '{uploaded.name}' saved.")
             if "CLAUDE_API_KEY" in str(e) or "GEMINI_API_KEY" in str(e):
-                st.info("Add CLAUDE_API_KEY or GEMINI_API_KEY to .env (and set LLM_PROVIDER) to auto-generate summaries.")
+                st.info("Add CLAUDE_API_KEY or GEMINI_API_KEY to .env "
+                        "(and set LLM_PROVIDER) to auto-generate summaries.")
             else:
                 st.warning(f"Could not auto-generate summary: {e}")
     else:
