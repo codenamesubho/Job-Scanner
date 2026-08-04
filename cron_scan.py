@@ -21,8 +21,8 @@ CAPTCHA flow unattended.
 
 import argparse
 import os
-from datetime import datetime
 
+from cli_common import add_search_args, criteria_from_args, log as _log
 from scanner import (
     ScanResult, SearchCriteria, get_criteria, jsearch_search_jobs,
     linkedin_playwright_search, naukri_search, prefixed_logger,
@@ -32,24 +32,12 @@ from scanner.linkedin_playwright import SESSION_FILE as LINKEDIN_SESSION_FILE
 from scanner.naukri_playwright import SESSION_FILE as NAUKRI_SESSION_FILE
 
 
-def _log(msg: str) -> None:
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{ts}] {msg}", flush=True)
-
-
 def parse_args():
     # get_criteria() always returns a fully-populated dict — either the saved
     # search_criteria row, or profile._CRITERIA_DEFAULTS if none was ever saved.
     crit = get_criteria()
     parser = argparse.ArgumentParser(description="Daily job scan across every enabled source")
-    parser.add_argument("--keywords", default=crit["keywords"],
-                         help="Comma-separated keywords (default: saved search criteria)")
-    parser.add_argument("--location", default=crit["location"],
-                         help="Job location (default: saved search criteria)")
-    parser.add_argument("--results", type=int, default=crit["results"],
-                         help="Max results per keyword (default: saved search criteria)")
-    parser.add_argument("--hours", type=int, default=crit["hours"],
-                         help="Max age of postings in hours (default: saved search criteria)")
+    add_search_args(parser, crit)
     return parser.parse_args()
 
 
@@ -66,7 +54,7 @@ def _scan(source_name: str, scan_fn, criteria: SearchCriteria) -> ScanResult:
 
 def main() -> None:
     args = parse_args()
-    criteria = SearchCriteria(args.keywords, args.location, args.results, args.hours)
+    criteria = criteria_from_args(args)
     _log(f"Starting daily scan — keywords='{criteria.keywords}' location='{criteria.location}' "
          f"results={criteria.results} hours={criteria.hours}")
 

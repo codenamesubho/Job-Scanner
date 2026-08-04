@@ -2,16 +2,17 @@ import argparse
 import os
 from datetime import datetime
 
+from cli_common import add_search_args
 from scanner import search_jobs, display_jobs, filter_by_exclude, filter_by_remote_flag, save_jobs
 from scanner.config import SEARCH_KEYWORDS, SEARCH_LOCATION, RESULTS_WANTED, HOURS_OLD
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="LinkedIn Job Scanner")
-    parser.add_argument("--keywords", default=SEARCH_KEYWORDS, help="Job search keywords")
-    parser.add_argument("--location", default=SEARCH_LOCATION, help="Job location")
-    parser.add_argument("--results", type=int, default=RESULTS_WANTED, help="Max results to fetch")
-    parser.add_argument("--hours", type=int, default=HOURS_OLD, help="Max age of postings in hours")
+    # main.py is the one script whose defaults come from .env rather than the saved
+    # search-criteria profile — that is what the SEARCH_* constants are for.
+    add_search_args(parser, {"keywords": SEARCH_KEYWORDS, "location": SEARCH_LOCATION,
+                              "results": RESULTS_WANTED, "hours": HOURS_OLD})
     parser.add_argument("--remote-only", action="store_true", help="Show only remote jobs (is_remote flag)")
     parser.add_argument("--exclude", nargs="*", default=[], help="Title keywords to exclude")
     parser.add_argument("--save", action="store_true", help="Save results to output/ as CSV")

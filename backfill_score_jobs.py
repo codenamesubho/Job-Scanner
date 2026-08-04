@@ -15,13 +15,13 @@ Usage:
 """
 import argparse
 
+from cli_common import add_top_arg
 from scanner import score_unscored_jobs
 
 
 def main():
     parser = argparse.ArgumentParser(description="Score jobs that need scoring")
-    parser.add_argument("--top", type=int, default=None,
-                         help="Only score the top N jobs by score (default: all eligible jobs)")
+    add_top_arg(parser, "score")
     args = parser.parse_args()
 
     scored = score_unscored_jobs(log_fn=print, limit=args.top)

@@ -18,17 +18,16 @@ Usage:
 """
 import argparse
 
+from cli_common import add_force_arg, add_top_arg
 from scanner import extract_missing_job_requirements
 from scanner.llm import scoring_mode
 
 
 def main():
     parser = argparse.ArgumentParser(description="Backfill structured JD extraction for existing jobs")
-    parser.add_argument("--top", type=int, default=None,
-                         help="Only extract the top N jobs by score (default: all eligible jobs)")
-    parser.add_argument("--force", action="store_true",
-                         help="Re-extract every scorable job, even ones that already have "
-                              "jd_extracted populated (default: only jobs missing it)")
+    add_top_arg(parser, "extract")
+    add_force_arg(parser, "Re-extract every scorable job, even ones that already have "
+                           "jd_extracted populated (default: only jobs missing it)")
     args = parser.parse_args()
 
     if scoring_mode() != "structured":

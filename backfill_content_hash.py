@@ -8,13 +8,14 @@ Usage:
 """
 import argparse
 
+from cli_common import add_force_arg
+
 from scanner import backfill_content_hashes
 
 
 def main():
     parser = argparse.ArgumentParser(description="Backfill jobs.content_hash for existing jobs")
-    parser.add_argument("--force", action="store_true",
-                         help="Recompute content_hash for every job, even ones that already have one")
+    add_force_arg(parser, "Recompute content_hash for every job, even ones that already have one")
     args = parser.parse_args()
 
     updated = backfill_content_hashes(force=args.force)
