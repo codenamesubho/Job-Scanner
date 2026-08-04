@@ -10,14 +10,12 @@ st.set_page_config(page_title="Job Scanner", page_icon="💼", layout="wide")
 # seed_sidebar_defaults()'s docstring in ui/sidebar.py.
 seed_sidebar_defaults()
 
-(keywords, location, results, hours, scan_all_clicked,
- scan_clicked, li_pw_clicked, naukri_clicked, boards_clicked, jsearch_clicked) = render_sidebar()
+criteria, scan_request = render_sidebar()
 
 tab_jobs, tab_profile = st.tabs(["📋 Jobs", "👤 Profile"])
 
 with tab_jobs:
-    render_jobs_tab(keywords, location, results, hours, scan_all_clicked, scan_clicked,
-                     li_pw_clicked, naukri_clicked, boards_clicked, jsearch_clicked)
+    render_jobs_tab(criteria, scan_request)
 
 with tab_profile:
     render_profile_tab()
