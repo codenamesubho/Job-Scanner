@@ -27,8 +27,11 @@ def fetch_jobs(company: str, company_name: str) -> pd.DataFrame:
         date_posted = None
         if created_at:
             try:
-                date_posted = dt.datetime.utcfromtimestamp(
-                    int(created_at) / 1000
+                # fromtimestamp(..., dt.UTC) rather than the deprecated
+                # utcfromtimestamp(); the result is tz-aware but strftime()
+                # renders the same date string.
+                date_posted = dt.datetime.fromtimestamp(
+                    int(created_at) / 1000, dt.UTC
                 ).strftime("%Y-%m-%d")
             except (ValueError, TypeError, OSError):
                 date_posted = None

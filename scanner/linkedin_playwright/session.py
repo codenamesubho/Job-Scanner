@@ -7,7 +7,6 @@ object through every scraping helper to remove a global that nothing currently
 races would be a large change for a theoretical gain. It stays a known
 limitation rather than a pretend fix.
 """
-import re
 from datetime import datetime
 from pathlib import Path
 
@@ -74,10 +73,6 @@ def _fill_input(page: Page, selectors: tuple, value: str) -> None:
             return
     raise RuntimeError(f"Could not find input field. Tried: {selectors}")
 
-
-def _extract_job_id(href: str) -> str | None:
-    m = re.search(r"/jobs/view/(\d+)", href)
-    return m.group(1) if m else None
 
 def _wait_for_search_results(page: Page) -> None:
     try:

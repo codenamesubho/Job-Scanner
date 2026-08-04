@@ -218,7 +218,6 @@ def generate_summary(resume_text: str) -> str:
     return execute_with_breaker(_query)
 
 
-_JD_EXTRACT_MAX_CHARS = 100000
 
 _JD_EXTRACT_PROMPT = _PROMPTS["jd_extract"]["template"]
 

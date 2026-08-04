@@ -108,7 +108,6 @@ if not os.getenv("LANGFUSE_HOST") and os.getenv("LANGFUSE_BASE_URL"):
 from ._breaker import BREAKER, is_rate_limit_error as _is_rate_limit_error  # noqa: E402
 from ._tracing import install_callbacks, is_tracing, observe  # noqa: E402
 
-_is_tracing = is_tracing          # kept: referenced by name elsewhere in this module
 install_callbacks()
 
 

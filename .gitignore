@@ -12,7 +12,19 @@ data/jobs.db.bak-*
 data/playwright_sessions/*.json
 project_progress.md
 test_litellm_cliproxy_cache.py
-debug_linkedin_scan.py
+
+# pytest's tmp_path root, when TMPDIR isn't usable it lands here
+pytest-of-*/
+.pytest_cache/
+.ruff_cache/
+
+# Local tooling / scratch — kept on disk, just not tracked
+.mcp.json
+.agents/
+skills-lock.json
+config.yaml
+docker-compose.yml
+issue.json
 
 # IDE
 .idea/
