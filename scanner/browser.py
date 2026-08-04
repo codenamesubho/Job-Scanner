@@ -3,6 +3,16 @@
 previously redefined the same user agent, stealth script, and launch args.
 """
 
+import os
+
+
+def debug_headful() -> bool:
+    """True if SCAN_DEBUG_HEADFUL=1 (or true/yes) is set in the environment —
+    forces LinkedIn/Naukri scan browsers to launch visibly instead of
+    headless, so a failing/flaky scan can be watched live. Set it in .env."""
+    return os.getenv("SCAN_DEBUG_HEADFUL", "").strip().lower() in ("1", "true", "yes")
+
+
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
