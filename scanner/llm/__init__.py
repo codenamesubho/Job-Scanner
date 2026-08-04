@@ -71,7 +71,7 @@ def _raw_completion_text(response) -> str:
         return f"(failed to extract raw response: {type(e).__name__}: {e})"
 
 
-load_dotenv(dotenv_path="~/.env")
+load_dotenv(dotenv_path=os.path.expanduser(os.getenv("ENV_FILE", "~/.env")), override=True)
 
 if not os.getenv("LANGFUSE_HOST") and os.getenv("LANGFUSE_BASE_URL"):
     # Both litellm's "langfuse" callback and the langfuse SDK itself read

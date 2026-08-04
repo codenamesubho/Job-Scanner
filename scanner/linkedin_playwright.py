@@ -11,6 +11,7 @@ into a UI log panel instead.
 
 import re
 import threading
+import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -150,6 +151,22 @@ def _wait_for_search_results(page: Page) -> None:
         )
     except Exception:
         page.wait_for_timeout(1500)
+
+
+def _wait_for_job_results(page: Page) -> None:
+    """Wait for the job-search results list (or a 'no results' banner) to
+    actually render before scraping — `domcontentloaded` fires well before
+    LinkedIn's client-side JS has populated any job cards, which is
+    especially likely to lose the race when several search pages are being
+    scraped in parallel."""
+    try:
+        page.wait_for_selector(
+            "a[href*='/jobs/view/'], .jobs-search-no-results-banner, "
+            "li[data-occludable-job-id]",
+            timeout=8000,
+        )
+    except Exception:
+        page.wait_for_timeout(2000)
 
 
 def _profile_container(link):
@@ -732,6 +749,12 @@ def _scrape_one_page(
     seen_ids: set[str] = set()
     rows: list[dict] = []
 
+    # Stagger parallel pages so `num_pages` browsers don't all launch and
+    # hit LinkedIn in the same instant — smooths out the burst that seemed
+    # to be tripping outright navigation failures under full parallelism.
+    if page_num:
+        time.sleep(page_num * 1.2)
+
     _log(f"Page {page_num}: starting (offset={page_num * _JOBS_PER_PAGE})")
     with sync_playwright() as p:
         browser, context = _launch(p)
@@ -747,9 +770,14 @@ def _scrape_one_page(
                 f"https://www.linkedin.com/jobs/search/?{params}",
                 wait_until="domcontentloaded",
             )
-            pg.wait_for_timeout(2000)
+            _wait_for_job_results(pg)
 
             rows = _scrape_job_cards(pg, seen_ids, _JOBS_PER_PAGE)
+            if not rows:
+                # Job list can populate via a follow-up XHR after the
+                # initial paint — give it one more beat before giving up.
+                pg.wait_for_timeout(2000)
+                rows = _scrape_job_cards(pg, seen_ids, _JOBS_PER_PAGE)
             _log(f"Page {page_num}: found {len(rows)} job cards")
 
             if rows:
@@ -814,8 +842,9 @@ def search_jobs(
                 added = len(all_rows) - before
                 _log(f"Page {pn} merged: +{added} unique jobs (total so far: {len(all_rows)})")
             except Exception as exc:
-                warnings.warn(f"Search page {pn} failed: {exc}")
-                _log(f"Page {pn} FAILED: {exc}")
+                detail = f"{type(exc).__name__}: {exc!r}"
+                warnings.warn(f"Search page {pn} failed: {detail}")
+                _log(f"Page {pn} FAILED: {detail}")
             if on_page_done:
                 on_page_done(pages_done, num_pages, len(all_rows))
     finally:

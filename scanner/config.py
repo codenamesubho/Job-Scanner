@@ -1,7 +1,7 @@
 import os
 from dotenv import load_dotenv
 
-load_dotenv(dotenv_path="~/.env")
+load_dotenv(dotenv_path=os.path.expanduser(os.getenv("ENV_FILE", "~/.env")), override=True)
 
 SEARCH_KEYWORDS = os.getenv("SEARCH_KEYWORDS", "software engineer")
 SEARCH_LOCATION = os.getenv("SEARCH_LOCATION", "Remote")

@@ -384,7 +384,6 @@ def get_stats() -> dict:
         "total":       sum(counts.values()),
         "new":         counts.get("new", 0),
         "shortlisted": counts.get("shortlisted", 0),
-        "saved":       counts.get("saved", 0),
         "applied":     counts.get("applied", 0),
         "rejected":    counts.get("rejected", 0),
     }
