@@ -19,7 +19,7 @@ from urllib.parse import urlencode, quote_plus
 import pandas as pd
 from playwright.sync_api import sync_playwright, Browser, BrowserContext, Page
 
-from .browser import debug_headful, launch_stealth_browser, STEALTH_SCRIPT_WITH_PLUGINS
+from .browser import SessionBrowser, STEALTH_SCRIPT_WITH_PLUGINS
 
 SESSION_FILE = Path("data/playwright_sessions/linkedin.json")
 
@@ -72,29 +72,21 @@ _PANEL_SELECTORS = (
 
 # ── Browser helpers ────────────────────────────────────────────────────────────
 
+_SESSION = SessionBrowser(
+    SESSION_FILE,
+    viewport={"width": 1280, "height": 800},
+    timezone_id="Asia/Kolkata",
+    stealth_script=STEALTH_SCRIPT_WITH_PLUGINS,
+    try_real_chrome=True,
+)
+
+
 def _launch(p, *, headless: bool | None = None, load_session: bool = True) -> tuple[Browser, BrowserContext]:
-    """headless=None (the default for every scan call site) resolves to
-    `not debug_headful()`, so setting SCAN_DEBUG_HEADFUL=1 in .env makes
-    every LinkedIn scan browser launch visibly. Callers with a hard
-    requirement (login() always headed, send_linkedin_message()'s
-    auto_send toggle) pass headless explicitly and are unaffected."""
-    if headless is None:
-        headless = not debug_headful()
-    storage_state_path = str(SESSION_FILE) if load_session and SESSION_FILE.exists() else None
-    return launch_stealth_browser(
-        p,
-        headless=headless,
-        storage_state_path=storage_state_path,
-        viewport={"width": 1280, "height": 800},
-        timezone_id="Asia/Kolkata",
-        stealth_script=STEALTH_SCRIPT_WITH_PLUGINS,
-        try_real_chrome=True,
-    )
+    return _SESSION.launch(p, headless=headless, load_session=load_session)
 
 
 def _save_session(context: BrowserContext) -> None:
-    SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
-    context.storage_state(path=str(SESSION_FILE))
+    _SESSION.save(context)
 
 
 def _is_logged_in(page: Page) -> bool:
@@ -1090,6 +1082,35 @@ def _goto_next_results_page(page: Page, target_page: int) -> bool:
     return True
 
 
+SEARCH_URL           = "https://www.linkedin.com/jobs/search/"
+SEMANTIC_SEARCH_URL  = "https://www.linkedin.com/jobs/search-results/"
+
+
+def build_search_url(keywords: str, location: str, seconds: int,
+                      keyword_mode: str = "structured") -> str:
+    """Build the results URL for one search.
+
+    The two modes hit genuinely different endpoints, not just different params:
+
+    - "structured" — /jobs/search/ with separate keywords/location/f_TPR params,
+      the way LinkedIn's own search form submits them.
+    - "natural_language" — /jobs/search-results/, LinkedIn's AI-powered semantic
+      search, with the location and time window folded into one free-text
+      keywords string and no location/f_TPR params at all.
+
+    Getting this wrong is not loud: pointing the natural-language query at a URL
+    shape that endpoint does not accept collapses the page to a single job's
+    detail view, which scrapes as one bogus "job" rather than as an error.
+    """
+    if keyword_mode == "natural_language":
+        hours_old = seconds // 3600
+        query = {"keywords": f"{keywords} in {location} in last {hours_old} hours"}
+        return f"{SEMANTIC_SEARCH_URL}?{urlencode(query)}"
+
+    query = {"keywords": keywords, "location": location, "f_TPR": f"r{seconds}"}
+    return f"{SEARCH_URL}?{urlencode(query)}"
+
+
 def _scrape_pages(
     keywords: str,
     location: str,
@@ -1136,15 +1157,8 @@ def _scrape_pages(
         browser, context = _launch(p)
         pg = context.new_page()
         try:
-            if semantic:
-                base_url = "https://www.linkedin.com/jobs/search-results/"
-                hours_old = seconds // 3600
-                query = {"keywords": f"{keywords} in {location} in last {hours_old} hours"}
-            else:
-                base_url = "https://www.linkedin.com/jobs/search/"
-                query = {"keywords": keywords, "location": location, "f_TPR": f"r{seconds}"}
-            params = urlencode(query)
-            pg.goto(f"{base_url}?{params}", wait_until="domcontentloaded")
+            pg.goto(build_search_url(keywords, location, seconds, keyword_mode),
+                    wait_until="domcontentloaded")
             _wait_for_job_results(pg)
             _wait_for_first_card_ready(pg)
 
