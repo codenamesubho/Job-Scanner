@@ -540,88 +540,170 @@ def login(email: str, password: str) -> bool:
 _JOBS_PER_PAGE = 25  # LinkedIn's fixed page size for job search
 _MIN_PAGES     = 3   # always scan at least this many pages per keyword
 _MAX_PAGES     = 4   # LinkedIn search results get unreliable/rate-limited beyond this
-_MAX_PARALLEL_WORKERS = 2  # cap concurrent browser instances to avoid 429s/li.protects.net blocks
+_MAX_PARALLEL_WORKERS = 1  # cap concurrent browser instances to avoid 429s/li.protects.net blocks
+_MAX_SCROLL_ATTEMPTS = 8  # cards load ~7 at a time; enough headroom to reach 25 per page
 
 
-def _scrape_job_cards(page: Page, seen_ids: set[str], limit: int) -> list[dict]:
-    """Collect job cards from the current search-results page.
+def _find_scroll_container(page: Page):
+    """Find the scrollable ancestor of the job-card list.
 
-    Scrolls up to 3 times to trigger lazy-loading, then returns up to `limit`
-    new (unseen) job rows. `seen_ids` is updated in place.
+    LinkedIn renders the results list inside its own overflow container, not
+    the page body, so `window.scrollTo` alone never triggers its lazy-loading
+    — it silently no-ops, capping extraction at whatever rendered on initial
+    load (~7 cards). Walks up from a rendered card generically (nearest
+    ancestor with scrollHeight > clientHeight and overflow-y auto/scroll)
+    rather than a hardcoded class name, since LinkedIn's wrapper classes
+    shift often. Returns None if no card/scrollable ancestor is found yet,
+    in which case callers fall back to scrolling the window.
+    """
+    handle = page.evaluate_handle("""
+        () => {
+            const card = document.querySelector("li[data-occludable-job-id]")
+                      || document.querySelector("a[href*='/jobs/view/']");
+            if (!card) return null;
+            let node = card.closest('li[data-occludable-job-id]') || card;
+            while (node && node !== document.body) {
+                const style = window.getComputedStyle(node);
+                if (node.scrollHeight > node.clientHeight + 10
+                        && /(auto|scroll)/.test(style.overflowY)) {
+                    return node;
+                }
+                node = node.parentElement;
+            }
+            return null;
+        }
+    """)
+    return handle.as_element()
+
+
+def _scroll_step(page: Page, container) -> None:
+    """Scroll one step toward the bottom of the job list — the container if
+    found, else the window as a fallback — then wait for lazy content."""
+    if container:
+        container.evaluate("el => el.scrollTo(0, el.scrollHeight)")
+    else:
+        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+    page.wait_for_timeout(1500)
+
+
+def _extract_cards(page: Page, seen_ids: set[str], limit: int) -> list[dict]:
+    """One extraction pass over whatever job cards are currently in the DOM.
+
+    Returns up to `limit` new (unseen) job rows. `seen_ids` is updated in place.
     """
     rows: list[dict] = []
 
-    for _ in range(3):
-        for link in page.query_selector_all("a[href*='/jobs/view/']"):
-            if len(rows) >= limit:
-                break
-            try:
-                href       = link.get_attribute("href") or ""
-                numeric_id = _extract_job_id(href)
-                if not numeric_id:
-                    continue
-                job_id = f"li-{numeric_id}"
-                if job_id in seen_ids:
-                    continue
-                seen_ids.add(job_id)
-
-                raw_title = link.inner_text().strip()
-                title     = raw_title.split("\n")[0].replace(" with verification", "").strip()
-                if not title:
-                    card = link.evaluate_handle(
-                        "el => el.closest('li') || el.closest('div[data-job-id]')"
-                    ).as_element()
-                    if card:
-                        for sel in ("[class*='title']", "strong", "h3", "h2"):
-                            t = card.query_selector(sel)
-                            if t:
-                                title = t.inner_text().strip().split("\n")[0]
-                                break
-
-                card = link.evaluate_handle(
-                    "el => el.closest('li') || el.closest('[data-job-id]') || el.parentElement"
-                ).as_element()
-
-                company = location_str = ""
-                if card:
-                    for sel in (
-                        ".job-card-container__primary-description",
-                        ".artdeco-entity-lockup__subtitle",
-                        "[class*='company']",
-                        "span[class*='subtitle']",
-                    ):
-                        el = card.query_selector(sel)
-                        if el:
-                            company = el.inner_text().strip()
-                            break
-                    for sel in (
-                        ".job-card-container__metadata-item",
-                        ".artdeco-entity-lockup__caption",
-                        "[class*='location']",
-                        "span[class*='metadata']",
-                    ):
-                        el = card.query_selector(sel)
-                        if el:
-                            location_str = el.inner_text().strip()
-                            break
-
-                rows.append({
-                    "id":        job_id,
-                    "site":      "linkedin",
-                    "job_url":   f"https://www.linkedin.com/jobs/view/{numeric_id}/",
-                    "title":     title or "(no title)",
-                    "company":   company,
-                    "location":  location_str,
-                    "is_remote": int("remote" in location_str.lower()),
-                })
-            except Exception:
-                continue
-
+    for link in page.query_selector_all("a[href*='/jobs/view/']"):
         if len(rows) >= limit:
-            break  # don't scroll if we already have enough
+            break
+        try:
+            href       = link.get_attribute("href") or ""
+            numeric_id = _extract_job_id(href)
+            if not numeric_id:
+                continue
+            job_id = f"li-{numeric_id}"
+            if job_id in seen_ids:
+                continue
+            seen_ids.add(job_id)
 
-        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        page.wait_for_timeout(1500)
+            raw_title = link.inner_text().strip()
+            title     = raw_title.split("\n")[0].replace(" with verification", "").strip()
+            if not title:
+                card = link.evaluate_handle(
+                    "el => el.closest('li') || el.closest('div[data-job-id]')"
+                ).as_element()
+                if card:
+                    for sel in ("[class*='title']", "strong", "h3", "h2"):
+                        t = card.query_selector(sel)
+                        if t:
+                            title = t.inner_text().strip().split("\n")[0]
+                            break
+
+            card = link.evaluate_handle(
+                "el => el.closest('li') || el.closest('[data-job-id]') || el.parentElement"
+            ).as_element()
+
+            company = location_str = ""
+            if card:
+                for sel in (
+                    ".job-card-container__primary-description",
+                    ".artdeco-entity-lockup__subtitle",
+                    "[class*='company']",
+                    "span[class*='subtitle']",
+                ):
+                    el = card.query_selector(sel)
+                    if el:
+                        company = el.inner_text().strip()
+                        break
+                for sel in (
+                    ".job-card-container__metadata-item",
+                    ".artdeco-entity-lockup__caption",
+                    "[class*='location']",
+                    "span[class*='metadata']",
+                ):
+                    el = card.query_selector(sel)
+                    if el:
+                        location_str = el.inner_text().strip()
+                        break
+
+            rows.append({
+                "id":        job_id,
+                "site":      "linkedin",
+                "job_url":   f"https://www.linkedin.com/jobs/view/{numeric_id}/",
+                "title":     title or "(no title)",
+                "company":   company,
+                "location":  location_str,
+                "is_remote": int("remote" in location_str.lower()),
+            })
+        except Exception:
+            continue
+
+    return rows
+
+
+def _scrape_job_cards(page: Page, seen_ids: set[str], limit: int,
+                       scroll_strategy: str = "incremental") -> list[dict]:
+    """Collect job cards from the current search-results page.
+
+    scroll_strategy:
+    - "incremental" (default): extract whatever's rendered, scroll one step,
+      extract again, repeating until `limit` is reached, no new cards appear
+      for two consecutive rounds (end of list), or _MAX_SCROLL_ATTEMPTS is
+      hit. LinkedIn's list appends new cards to the DOM rather than
+      replacing/virtualizing old ones, so nothing is lost by extracting
+      between scrolls — and it matches how the list actually loads
+      (~7 cards per chunk).
+    - "all_first": scroll to the bottom repeatedly until the card count
+      stops growing (same cap), then extract once. Kept only for debug A/B
+      comparison against "incremental" (see debug_linkedin_scan.py) — no
+      production caller uses this.
+    """
+    container = _find_scroll_container(page)
+
+    if scroll_strategy == "all_first":
+        prev_count = -1
+        for _ in range(_MAX_SCROLL_ATTEMPTS):
+            count = page.evaluate("document.querySelectorAll(\"a[href*='/jobs/view/']\").length")
+            if count == prev_count:
+                break
+            prev_count = count
+            _scroll_step(page, container)
+        return _extract_cards(page, seen_ids, limit)
+
+    rows: list[dict] = []
+    stale_rounds = 0
+    for _ in range(_MAX_SCROLL_ATTEMPTS):
+        new_rows = _extract_cards(page, seen_ids, limit - len(rows))
+        rows.extend(new_rows)
+        if len(rows) >= limit:
+            break
+        if new_rows:
+            stale_rounds = 0
+        else:
+            stale_rounds += 1
+            if stale_rounds >= 2:
+                break
+        _scroll_step(page, container)
 
     return rows
 
@@ -741,11 +823,24 @@ def _scrape_one_page(
     keywords: str,
     location: str,
     seconds: int,
+    scroll_strategy: str = "incremental",
+    keyword_mode: str = "structured",
 ) -> list[dict]:
     """Scrape one search-results page + fetch all descriptions.
 
     Each call runs inside its own sync_playwright() so it is safe to call
     from a thread — Playwright's sync API is not thread-safe to share.
+
+    keyword_mode:
+    - "structured" (default): the usual /jobs/search/ page with separate
+      keywords/location/f_TPR query params, as LinkedIn's own search form
+      submits them.
+    - "natural_language": LinkedIn's /jobs/search-results/ page instead —
+      a different endpoint, not just different params — with location and
+      the time window folded into one free-text keywords string (e.g.
+      "Staff Software Engineer in Bengaluru in last 72 hours") and the
+      location/f_TPR params omitted entirely. Debug-only, for comparing
+      against "structured"; not used by any production caller.
     """
     seen_ids: set[str] = set()
     rows: list[dict] = []
@@ -761,24 +856,34 @@ def _scrape_one_page(
         browser, context = _launch(p)
         pg = context.new_page()
         try:
-            params = urlencode({
-                "keywords": keywords,
-                "location": location,
-                "f_TPR":    f"r{seconds}",
-                "start":    page_num * _JOBS_PER_PAGE,
-            })
+            if keyword_mode == "natural_language":
+                hours_old = seconds // 3600
+                base_url = "https://www.linkedin.com/jobs/search-results/"
+                query = {
+                    "keywords": f"{keywords} in {location} in last {hours_old} hours",
+                    "start":    page_num * _JOBS_PER_PAGE,
+                }
+            else:
+                base_url = "https://www.linkedin.com/jobs/search/"
+                query = {
+                    "keywords": keywords,
+                    "location": location,
+                    "f_TPR":    f"r{seconds}",
+                    "start":    page_num * _JOBS_PER_PAGE,
+                }
+            params = urlencode(query)
             pg.goto(
-                f"https://www.linkedin.com/jobs/search/?{params}",
+                f"{base_url}?{params}",
                 wait_until="domcontentloaded",
             )
             _wait_for_job_results(pg)
 
-            rows = _scrape_job_cards(pg, seen_ids, _JOBS_PER_PAGE)
+            rows = _scrape_job_cards(pg, seen_ids, _JOBS_PER_PAGE, scroll_strategy)
             if not rows:
                 # Job list can populate via a follow-up XHR after the
                 # initial paint — give it one more beat before giving up.
                 pg.wait_for_timeout(2000)
-                rows = _scrape_job_cards(pg, seen_ids, _JOBS_PER_PAGE)
+                rows = _scrape_job_cards(pg, seen_ids, _JOBS_PER_PAGE, scroll_strategy)
             _log(f"Page {page_num}: found {len(rows)} job cards")
 
             if rows:
@@ -800,6 +905,9 @@ def search_jobs(
     results_wanted: int = 25,
     hours_old: int = 72,
     on_page_done=None,
+    num_pages: int | None = None,
+    scroll_strategy: str = "incremental",
+    keyword_mode: str = "structured",
 ) -> pd.DataFrame:
     """Scrape LinkedIn Jobs while logged in. Returns DataFrame matching jobspy schema.
 
@@ -808,10 +916,23 @@ def search_jobs(
 
     on_page_done(pages_done, total_pages, jobs_so_far) is called from the main thread
     after each page completes — safe to use for Streamlit UI updates.
+
+    num_pages overrides the results_wanted-derived page count entirely (no _MIN_PAGES/
+    _MAX_PAGES clamping) — for debugging/testing an exact page count only; production
+    callers should leave this None and let results_wanted drive it as usual.
+
+    scroll_strategy is passed straight through to _scrape_job_cards() — see its
+    docstring. Production callers should leave this at the default "incremental";
+    "all_first" exists only for debug_linkedin_scan.py's A/B comparison.
+
+    keyword_mode is passed straight through to _scrape_one_page() — see its
+    docstring. Production callers should leave this at the default "structured";
+    "natural_language" exists only for debug_linkedin_scan.py's A/B comparison.
     """
-    seconds    = hours_old * 3600
-    num_pages  = min(_MAX_PAGES, max(_MIN_PAGES,
-                     (results_wanted + _JOBS_PER_PAGE - 1) // _JOBS_PER_PAGE))
+    seconds = hours_old * 3600
+    if num_pages is None:
+        num_pages = min(_MAX_PAGES, max(_MIN_PAGES,
+                         (results_wanted + _JOBS_PER_PAGE - 1) // _JOBS_PER_PAGE))
 
     _log(f"Searching LinkedIn: {keywords!r} in {location!r} | "
          f"{hours_old}h window | {num_pages} page(s) in parallel")
@@ -838,7 +959,7 @@ def search_jobs(
     def _run_page(page_num: int) -> list[dict]:
         if add_script_run_ctx is not None:
             add_script_run_ctx(threading.current_thread(), _st_ctx)
-        return _scrape_one_page(page_num, keywords, location, seconds)
+        return _scrape_one_page(page_num, keywords, location, seconds, scroll_strategy, keyword_mode)
 
     # Not a `with` block on purpose: exiting `with ThreadPoolExecutor()` calls
     # shutdown(wait=True), which blocks a KeyboardInterrupt/exception unwind
