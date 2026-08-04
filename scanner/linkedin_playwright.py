@@ -1070,11 +1070,22 @@ def _goto_next_results_page(page: Page, target_page: int) -> bool:
     # reload of the page it just navigated to (the click updates the URL's
     # `start=` param via history.pushState) forces a clean server render of
     # that page instead of relying on the in-place JS update.
-    try:
-        page.reload(wait_until="domcontentloaded")
-    except Exception:
-        pass
-    _wait_for_job_results(page)
+    #
+    # Skipped on /jobs/search-results/ (natural_language mode): verified
+    # live that this endpoint's `start=` param is client-side/history-only —
+    # the SPA reads it from in-memory state, not from the URL on a fresh
+    # load. Reloading there doesn't refresh page N's content; it silently
+    # resets the whole page back to page 1 (same job ids, `start=` param
+    # dropped from the URL), which looked like every "next page" was really
+    # just re-scraping page 1. The classic /jobs/search/ list has no such
+    # problem — its `start=` is a real server-side query param.
+    if "/jobs/search-results/" not in page.url:
+        try:
+            page.reload(wait_until="domcontentloaded")
+        except Exception:
+            pass
+        _wait_for_job_results(page)
+
     _wait_for_first_card_ready(page)
     return True
 
