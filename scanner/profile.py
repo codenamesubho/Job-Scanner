@@ -1,6 +1,6 @@
 import io
 import sqlite3
-from scanner.database import _connect as _db_connect
+from .database import connect as _db_connect
 
 # ── Table definitions ──────────────────────────────────────────────────────────
 
