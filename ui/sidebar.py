@@ -1,9 +1,13 @@
 import streamlit as st
 
-from scanner import get_criteria
+from scanner import SearchCriteria, get_criteria
 
 from .constants import HOURS_OPTIONS
+from .models import ScanRequest
 from .scoring import _render_score_button
+from .session_keys import (
+    PROFILE_LOAD, SB_HOURS, SB_KEYWORDS, SB_LOCATION, SB_RESULTS,
+)
 
 
 def seed_sidebar_defaults() -> None:
@@ -14,42 +18,44 @@ def seed_sidebar_defaults() -> None:
     st.rerun(); on the next run this function fires first so the widget
     keys are set before render_sidebar() instantiates the sidebar widgets.
     """
-    if "_profile_load" in st.session_state:
-        _pl = st.session_state.pop("_profile_load")
-        st.session_state.sb_keywords = _pl["keywords"]
-        st.session_state.sb_location = _pl["location"]
-        st.session_state.sb_results  = _pl["results"]
-        st.session_state.sb_hours    = _pl["hours"]
+    if PROFILE_LOAD in st.session_state:
+        _pl = st.session_state.pop(PROFILE_LOAD)
+        st.session_state[SB_KEYWORDS] = _pl["keywords"]
+        st.session_state[SB_LOCATION] = _pl["location"]
+        st.session_state[SB_RESULTS]  = _pl["results"]
+        st.session_state[SB_HOURS]    = _pl["hours"]
 
     # Seed sidebar defaults from DB once per session
     _crit = get_criteria()
     for _key, _field, _default in (
-        ("sb_keywords", "keywords", "software engineer"),
-        ("sb_location", "location", "USA"),
-        ("sb_results",  "results",  25),
-        ("sb_hours",    "hours",    72),
+        (SB_KEYWORDS, "keywords", "software engineer"),
+        (SB_LOCATION, "location", "USA"),
+        (SB_RESULTS,  "results",  25),
+        (SB_HOURS,    "hours",    72),
     ):
         if _key not in st.session_state:
             st.session_state[_key] = _crit.get(_field, _default)
 
 
-def render_sidebar() -> tuple[str, str, int, int, bool, bool, bool, bool, bool, bool]:
+def render_sidebar() -> tuple[SearchCriteria, ScanRequest]:
+    """Draw the sidebar and return what the user asked for: the search criteria,
+    and which scan buttons were clicked on this run."""
     with st.sidebar:
         st.title("💼 Job Scanner")
         st.subheader("Search Settings")
 
         keywords = st.text_input(
             "Keywords (comma-separated)",
-            key="sb_keywords",
+            key=SB_KEYWORDS,
             help="e.g. backend engineer, python developer",
         )
-        location = st.text_input("Location", key="sb_location")
-        results  = st.slider("Max results per keyword", 5, 100, key="sb_results")
+        location = st.text_input("Location", key=SB_LOCATION)
+        results  = st.slider("Max results per keyword", 5, 100, key=SB_RESULTS)
 
         hours = st.selectbox(
             "Posted within", HOURS_OPTIONS,
             format_func=lambda h: f"{h}h ({h // 24}d)",
-            key="sb_hours",
+            key=SB_HOURS,
         )
 
         st.markdown("**Scan All Sources**")
@@ -72,5 +78,14 @@ def render_sidebar() -> tuple[str, str, int, int, bool, bool, bool, bool, bool, 
                                      help="Aggregator covering LinkedIn/Indeed/Glassdoor/ZipRecruiter. "
                                           "Requires JSEARCH_API_KEY in .env.")
 
-    return (keywords, location, results, hours, scan_all_clicked,
-            scan_clicked, li_pw_clicked, naukri_clicked, boards_clicked, jsearch_clicked)
+    return (
+        SearchCriteria(keywords, location, results, hours),
+        ScanRequest(
+            scan_all=scan_all_clicked,
+            jobspy=scan_clicked,
+            linkedin_login=li_pw_clicked,
+            naukri=naukri_clicked,
+            company_boards=boards_clicked,
+            jsearch=jsearch_clicked,
+        ),
+    )
