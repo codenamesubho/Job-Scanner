@@ -90,7 +90,7 @@ def _launch(p, *, headless: bool | None = None, load_session: bool = True) -> tu
         viewport={"width": 1280, "height": 800},
         timezone_id="Asia/Kolkata",
         stealth_script=STEALTH_SCRIPT_WITH_PLUGINS,
-        try_real_chrome=False,
+        try_real_chrome=True,
     )
 
 
@@ -540,6 +540,7 @@ def login(email: str, password: str) -> bool:
 _JOBS_PER_PAGE = 25  # LinkedIn's fixed page size for job search
 _MIN_PAGES     = 3   # always scan at least this many pages per keyword
 _MAX_PAGES     = 4   # LinkedIn search results get unreliable/rate-limited beyond this
+_MAX_PARALLEL_WORKERS = 2  # cap concurrent browser instances to avoid 429s/li.protects.net blocks
 
 
 def _scrape_job_cards(page: Page, seen_ids: set[str], limit: int) -> list[dict]:
@@ -843,7 +844,7 @@ def search_jobs(
     # shutdown(wait=True), which blocks a KeyboardInterrupt/exception unwind
     # until every in-flight page scrape finishes — see the same pattern (and
     # rationale) in scanner/llm/raw_scoring.py's batch-scoring pool.
-    pool = ThreadPoolExecutor(max_workers=num_pages)
+    pool = ThreadPoolExecutor(max_workers=min(num_pages, _MAX_PARALLEL_WORKERS))
     try:
         futures = {
             pool.submit(_run_page, pn): pn

@@ -25,12 +25,48 @@ Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
 window.navigator.chrome = {runtime: {}};
 """
 
-# linkedin_playwright.py additionally masks the plugins array.
+# linkedin_playwright.py additionally masks the plugins array and several
+# other properties that differ between headless and headed Chrome and that
+# LinkedIn's bot detection checks: an empty window.chrome object, mismatched
+# permissions.query behavior for Notification, the SwiftShader/ANGLE
+# software-renderer WebGL string headless Chromium reports, and outerWidth/
+# outerHeight reporting 0 (no real browser chrome around a headless window).
 STEALTH_SCRIPT_WITH_PLUGINS = """
 Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
 Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
 Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
-window.navigator.chrome = {runtime: {}};
+window.navigator.chrome = {
+    runtime: {
+        connect: () => {},
+        sendMessage: () => {},
+    },
+    loadTimes: () => {},
+    csi: () => {},
+};
+
+const originalQuery = window.navigator.permissions.query;
+window.navigator.permissions.query = (parameters) => (
+    parameters.name === 'notifications'
+        ? Promise.resolve({ state: Notification.permission })
+        : originalQuery(parameters)
+);
+
+const getParameterProxy = (getParameter) => function (parameter) {
+    if (parameter === 37445) return 'Intel Inc.';
+    if (parameter === 37446) return 'Intel Iris OpenGL Engine';
+    return getParameter.call(this, parameter);
+};
+if (window.WebGLRenderingContext) {
+    WebGLRenderingContext.prototype.getParameter = getParameterProxy(WebGLRenderingContext.prototype.getParameter);
+}
+if (window.WebGL2RenderingContext) {
+    WebGL2RenderingContext.prototype.getParameter = getParameterProxy(WebGL2RenderingContext.prototype.getParameter);
+}
+
+if (!window.outerWidth || !window.outerHeight) {
+    Object.defineProperty(window, 'outerWidth', {get: () => window.innerWidth});
+    Object.defineProperty(window, 'outerHeight', {get: () => window.innerHeight + 85});
+}
 """
 
 LAUNCH_ARGS = [
