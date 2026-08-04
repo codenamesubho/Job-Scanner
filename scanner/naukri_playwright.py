@@ -9,7 +9,7 @@ from pathlib import Path
 import pandas as pd
 from playwright.sync_api import sync_playwright, BrowserContext, Page
 
-from .browser import launch_stealth_browser
+from .browser import debug_headful, launch_stealth_browser
 
 SESSION_FILE = Path("data/playwright_sessions/naukri.json")
 
@@ -18,7 +18,13 @@ def _slugify(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
 
 
-def _launch(p, *, headless: bool = True, load_session: bool = True):
+def _launch(p, *, headless: bool | None = None, load_session: bool = True):
+    """headless=None (the default for the scan call site) resolves to
+    `not debug_headful()`, so setting SCAN_DEBUG_HEADFUL=1 in .env makes
+    the scan browser launch visibly. login() passes headless=False
+    explicitly and is unaffected."""
+    if headless is None:
+        headless = not debug_headful()
     storage_state_path = str(SESSION_FILE) if load_session and SESSION_FILE.exists() else None
     return launch_stealth_browser(
         p,

@@ -20,7 +20,7 @@ from urllib.parse import urlencode, quote_plus
 import pandas as pd
 from playwright.sync_api import sync_playwright, Browser, BrowserContext, Page
 
-from .browser import launch_stealth_browser, STEALTH_SCRIPT_WITH_PLUGINS
+from .browser import debug_headful, launch_stealth_browser, STEALTH_SCRIPT_WITH_PLUGINS
 
 SESSION_FILE = Path("data/playwright_sessions/linkedin.json")
 
@@ -73,7 +73,14 @@ _PANEL_SELECTORS = (
 
 # ── Browser helpers ────────────────────────────────────────────────────────────
 
-def _launch(p, *, headless: bool = True, load_session: bool = True) -> tuple[Browser, BrowserContext]:
+def _launch(p, *, headless: bool | None = None, load_session: bool = True) -> tuple[Browser, BrowserContext]:
+    """headless=None (the default for every scan call site) resolves to
+    `not debug_headful()`, so setting SCAN_DEBUG_HEADFUL=1 in .env makes
+    every LinkedIn scan browser launch visibly. Callers with a hard
+    requirement (login() always headed, send_linkedin_message()'s
+    auto_send toggle) pass headless explicitly and are unaffected."""
+    if headless is None:
+        headless = not debug_headful()
     storage_state_path = str(SESSION_FILE) if load_session and SESSION_FILE.exists() else None
     return launch_stealth_browser(
         p,

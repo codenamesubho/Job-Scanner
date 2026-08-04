@@ -16,6 +16,7 @@ from .greenhouse import fetch_jobs as greenhouse_fetch_jobs
 from .lever import fetch_jobs as lever_fetch_jobs
 from .ashby import fetch_jobs as ashby_fetch_jobs
 from .jsearch import search_jobs as jsearch_search_jobs
+from .manual import add_job_by_url
 
 from .llm import (
     generate_summary, score_jobs, BATCH_SIZE, draft_referral_message,

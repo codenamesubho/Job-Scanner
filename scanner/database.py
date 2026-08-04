@@ -143,13 +143,18 @@ def content_hash(description: str | None) -> str | None:
     return hashlib.sha256(text.encode()).hexdigest()[:12]
 
 
-def save_jobs(df: pd.DataFrame) -> int:  # noqa: C901
+def save_jobs(df: pd.DataFrame, default_status: str = "new") -> int:  # noqa: C901
     """Insert new jobs, skipping rows that duplicate an existing job's
     normalized (title, company) pair, OR its content_hash (sha256 of the
     description — see content_hash()), under a different id — e.g. the same
     role scraped from LinkedIn and mirrored on its Greenhouse/Lever board,
     or the same posting under a differently-cased title across sources.
     Returns the number of genuinely new rows inserted.
+
+    `default_status` is the status a genuinely new row is inserted with
+    (e.g. "shortlisted" for jobs added by hand via add_job_by_url, vs. the
+    "new" default for scan-sourced jobs) — it has no effect on rows that
+    upsert against an existing id, since status is never overwritten there.
 
     Rules:
     - status and first_seen are never overwritten on same-id upserts.
@@ -197,7 +202,7 @@ def save_jobs(df: pd.DataFrame) -> int:  # noqa: C901
     # clobber a previously-populated value — keep the old value in that case.
     # content_hash is derived (computed per-row below), not sourced from the
     # incoming DataFrame like the _STORE_COLS columns — appended separately.
-    upsert_cols = cols + ["content_hash"]
+    upsert_cols = cols + ["content_hash", "status"]
     update_clause = ", ".join(
         f"{c} = COALESCE(NULLIF(excluded.{c}, ''), {c})"
         for c in cols
@@ -233,7 +238,7 @@ def save_jobs(df: pd.DataFrame) -> int:  # noqa: C901
             row_hash = content_hash(row.get("description"))
 
             if rid in existing_ids:
-                to_upsert.append([row[c] for c in cols] + [row_hash])
+                to_upsert.append([row[c] for c in cols] + [row_hash, default_status])
                 continue
 
             canon = canonical_by_hash.get(row_hash) if row_hash else None
@@ -246,7 +251,7 @@ def save_jobs(df: pd.DataFrame) -> int:  # noqa: C901
                 backfill.append((new_direct if not canon_direct else None, canon_id))
                 continue
 
-            to_upsert.append([row[c] for c in cols] + [row_hash])
+            to_upsert.append([row[c] for c in cols] + [row_hash, default_status])
             new_count += 1
             canonical[key] = (rid, row.get("job_url_direct"))
             if row_hash:
@@ -376,11 +381,12 @@ def get_stats() -> dict:
         ).fetchall()
     counts = dict(rows)
     return {
-        "total":    sum(counts.values()),
-        "new":      counts.get("new", 0),
-        "saved":    counts.get("saved", 0),
-        "applied":  counts.get("applied", 0),
-        "rejected": counts.get("rejected", 0),
+        "total":       sum(counts.values()),
+        "new":         counts.get("new", 0),
+        "shortlisted": counts.get("shortlisted", 0),
+        "saved":       counts.get("saved", 0),
+        "applied":     counts.get("applied", 0),
+        "rejected":    counts.get("rejected", 0),
     }
 
 

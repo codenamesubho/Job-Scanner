@@ -1,4 +1,4 @@
-STATUSES      = ["new", "saved", "applied", "rejected"]
+STATUSES      = ["new", "shortlisted", "saved", "applied", "rejected"]
 HOURS_OPTIONS = [24, 48, 72, 168, 336, 720]
 
 # Match-score color thresholds (out of 100) shown next to a job's score.

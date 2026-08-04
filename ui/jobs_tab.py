@@ -1,7 +1,7 @@
 import pandas as pd
 import streamlit as st
 
-from scanner import get_jobs, get_stats, parse_jd_extracted
+from scanner import add_job_by_url, get_jobs, get_stats, parse_jd_extracted
 
 from .constants import DEFAULT_MIN_SCORE, STATUSES
 from .detail_panel import _job_detail_dialog
@@ -13,12 +13,13 @@ from .scan_handlers import (
 
 def _render_stats() -> None:
     stats = get_stats()
-    m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("Total",    stats["total"])
-    m2.metric("New",      stats["new"])
-    m3.metric("Saved",    stats["saved"])
-    m4.metric("Applied",  stats["applied"])
-    m5.metric("Rejected", stats["rejected"])
+    m1, m2, m3, m4, m5, m6 = st.columns(6)
+    m1.metric("Total",       stats["total"])
+    m2.metric("New",         stats["new"])
+    m3.metric("Shortlisted", stats["shortlisted"])
+    m4.metric("Saved",       stats["saved"])
+    m5.metric("Applied",     stats["applied"])
+    m6.metric("Rejected",    stats["rejected"])
 
 
 def _company_type_options() -> list[str]:
@@ -34,6 +35,21 @@ def _company_type_options() -> list[str]:
         if parsed and parsed.get("company_type"):
             types.add(parsed["company_type"])
     return sorted(types)
+
+
+def _render_add_job_by_url() -> None:
+    with st.expander("➕ Add job by URL"):
+        with st.form("add_job_by_url_form", clear_on_submit=True):
+            url       = st.text_input("Job URL", placeholder="https://...")
+            submitted = st.form_submit_button("Add Job", type="primary")
+        if submitted:
+            if not url.strip():
+                st.warning("Please paste a job URL.")
+            else:
+                success, message = add_job_by_url(url)
+                (st.success if success else st.error)(message)
+                if success:
+                    st.rerun()
 
 
 def _render_filters() -> tuple[str, str, bool, str]:
@@ -102,6 +118,8 @@ def render_jobs_tab(keywords: str, location: str, results: int, hours: int,
         handle_jsearch_scan(keywords, location, results, hours)
 
     st.divider()
+
+    _render_add_job_by_url()
 
     search_text, status_filter, remote_only, company_type_filter = _render_filters()
     min_score = st.slider("Minimum score", 0, 100, value=DEFAULT_MIN_SCORE)
