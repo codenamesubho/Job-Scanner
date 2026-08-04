@@ -1,10 +1,11 @@
 import pandas as pd
 import streamlit as st
 
-from scanner import add_job_by_url, get_jobs, get_stats, parse_jd_extracted
+from scanner import SearchCriteria, add_job_by_url, get_jobs, get_stats, parse_jd_extracted
 
 from .constants import DEFAULT_MIN_SCORE, STATUSES
 from .detail_panel import _job_detail_dialog
+from .models import ScanRequest
 from .scan_handlers import (
     handle_company_boards_scan, handle_jobspy_scan, handle_jsearch_scan,
     handle_linkedin_scan, handle_naukri_scan, handle_scan_all,
@@ -98,23 +99,21 @@ def _render_jobs_table(jobs: pd.DataFrame) -> tuple[pd.DataFrame, list[int]]:
     return jobs_reset, event.selection.rows
 
 
-def render_jobs_tab(keywords: str, location: str, results: int, hours: int,
-                     scan_all_clicked: bool, scan_clicked: bool, li_pw_clicked: bool,
-                     naukri_clicked: bool, boards_clicked: bool, jsearch_clicked: bool) -> None:
+def render_jobs_tab(criteria: SearchCriteria, scan: ScanRequest) -> None:
     _render_stats()
 
-    if scan_all_clicked:
-        handle_scan_all(keywords, location, results, hours)
-    if scan_clicked:
-        handle_jobspy_scan(keywords, location, results, hours)
-    if li_pw_clicked:
-        handle_linkedin_scan(keywords, location, results, hours)
-    if naukri_clicked:
-        handle_naukri_scan(keywords, location, results, hours)
-    if boards_clicked:
-        handle_company_boards_scan(keywords, location, results, hours)
-    if jsearch_clicked:
-        handle_jsearch_scan(keywords, location, results, hours)
+    if scan.scan_all:
+        handle_scan_all(criteria)
+    if scan.jobspy:
+        handle_jobspy_scan(criteria)
+    if scan.linkedin_login:
+        handle_linkedin_scan(criteria)
+    if scan.naukri:
+        handle_naukri_scan(criteria)
+    if scan.company_boards:
+        handle_company_boards_scan(criteria)
+    if scan.jsearch:
+        handle_jsearch_scan(criteria)
 
     st.divider()
 

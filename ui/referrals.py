@@ -52,24 +52,85 @@ def _render_saved_referrals(job_id: str) -> None:
                 st.rerun()
 
 
-def _render_contact_draft_and_send(sel: pd.Series, job_id: str, i: int, contact: dict, cand: dict) -> None:
+def _save_contact_referral(job_id: str, contact: dict, message: str, draft_key: str,
+                            linkedin_url: str | None = None) -> None:
+    """Persist a referral and clear the draft + cached contact list so the panel
+    redraws from the database on the next run."""
+    save_referral(
+        job_id=job_id,
+        name=contact["name"],
+        title=contact.get("title", ""),
+        linkedin_url=linkedin_url if linkedin_url is not None else contact.get("linkedin_url", ""),
+        message=message,
+        degree=contact.get("degree", ""),
+        photo_url=contact.get("photo_url", ""),
+    )
+    st.session_state.pop(draft_key, None)
+    st.session_state.pop(f"_contacts_{job_id}", None)
+
+
+def _draft_message(sel: pd.Series, contact: dict, cand: dict, draft_key: str) -> None:
+    """Ask the LLM for a referral message and stash it for editing."""
+    with st.spinner("Drafting…"):
+        try:
+            st.session_state[draft_key] = draft_referral_message(
+                candidate_summary=cand.get("summary", ""),
+                contact=contact,
+                job={
+                    "title":          sel.get("title", ""),
+                    "company":        sel.get("company", ""),
+                    "job_url":        sel.get("job_url", ""),
+                    "job_url_direct": sel.get("job_url_direct", ""),
+                },
+            )
+        except Exception as e:
+            st.error(f"Draft failed: {e}")
+
+
+def _send_on_linkedin(job_id: str, contact: dict, message: str, draft_key: str,
+                       auto_send: bool) -> None:
+    """Send the message, or open LinkedIn with it pre-filled for manual review.
+
+    Only an auto-send that actually succeeded saves the referral — a manual
+    pre-fill hasn't been sent yet at the point this returns, so recording it
+    would claim something that hasn't happened.
+    """
+    profile_url = contact.get("linkedin_url", "")
+    if not profile_url:
+        st.error("No LinkedIn URL for this contact.")
+        return
+
+    spinner = (f"Sending to {contact['name']} on LinkedIn…" if auto_send
+               else f"Opening LinkedIn for {contact['name']}…")
+    with st.spinner(spinner):
+        try:
+            ok = send_linkedin_message(profile_url, message, auto_send=auto_send)
+        except Exception as e:
+            st.error(f"Failed: {e}")
+            return
+
+    if not ok:
+        st.error("Message button not found — you may not be connected "
+                 "or LinkedIn requires Premium to message this person.")
+        return
+
+    if not auto_send:
+        st.info("Browser opened with message pre-filled. "
+                "Review, edit if needed, then click Send in LinkedIn.")
+        return
+
+    st.toast("Message sent on LinkedIn!")
+    _save_contact_referral(job_id, contact, message, draft_key, linkedin_url=profile_url)
+    st.rerun()
+
+
+def _render_contact_draft_and_send(sel: pd.Series, job_id: str, i: int, contact: dict,
+                                    cand: dict) -> None:
+    """Draft -> edit -> save/send, for one discovered contact."""
     draft_key = f"_draft_{job_id}_{i}"
+
     if st.button("✍️ Draft Message", key=f"draft_btn_{job_id}_{i}"):
-        with st.spinner("Drafting…"):
-            try:
-                msg = draft_referral_message(
-                    candidate_summary=cand.get("summary", ""),
-                    contact=contact,
-                    job={
-                        "title":         sel.get("title", ""),
-                        "company":       sel.get("company", ""),
-                        "job_url":       sel.get("job_url", ""),
-                        "job_url_direct": sel.get("job_url_direct", ""),
-                    },
-                )
-                st.session_state[draft_key] = msg
-            except Exception as e:
-                st.error(f"Draft failed: {e}")
+        _draft_message(sel, contact, cand, draft_key)
 
     if draft_key not in st.session_state:
         return
@@ -88,66 +149,17 @@ def _render_contact_draft_and_send(sel: pd.Series, job_id: str, i: int, contact:
         label_visibility="collapsed",
     )
     auto_send = send_mode == "Auto-send"
+
     btn_save, btn_send = st.columns(2)
     if btn_save.button("💾 Save Referral", key=f"save_ref_{job_id}_{i}",
                        use_container_width=True):
-        save_referral(
-            job_id=job_id,
-            name=contact["name"],
-            title=contact.get("title", ""),
-            linkedin_url=contact.get("linkedin_url", ""),
-            message=edited_msg,
-            degree=contact.get("degree", ""),
-            photo_url=contact.get("photo_url", ""),
-        )
-        del st.session_state[draft_key]
-        st.session_state.pop(f"_contacts_{job_id}", None)
+        _save_contact_referral(job_id, contact, edited_msg, draft_key)
         st.toast("Referral saved.")
         st.rerun()
+
     send_label = "📨 Send on LinkedIn" if auto_send else "🖊 Open & pre-fill"
-    send_spinner = (
-        f"Sending to {contact['name']} on LinkedIn…"
-        if auto_send else
-        f"Opening LinkedIn for {contact['name']}…"
-    )
-    if btn_send.button(send_label, key=f"send_li_{job_id}_{i}",
-                       use_container_width=True):
-        profile_url = contact.get("linkedin_url", "")
-        if not profile_url:
-            st.error("No LinkedIn URL for this contact.")
-        else:
-            with st.spinner(send_spinner):
-                try:
-                    ok = send_linkedin_message(
-                        profile_url, edited_msg, auto_send=auto_send,
-                    )
-                    if ok:
-                        if auto_send:
-                            st.toast("Message sent on LinkedIn!")
-                            save_referral(
-                                job_id=job_id,
-                                name=contact["name"],
-                                title=contact.get("title", ""),
-                                linkedin_url=profile_url,
-                                message=edited_msg,
-                                degree=contact.get("degree", ""),
-                                photo_url=contact.get("photo_url", ""),
-                            )
-                            del st.session_state[draft_key]
-                            st.session_state.pop(f"_contacts_{job_id}", None)
-                            st.rerun()
-                        else:
-                            st.info(
-                                "Browser opened with message pre-filled. "
-                                "Review, edit if needed, then click Send in LinkedIn."
-                            )
-                    else:
-                        st.error(
-                            "Message button not found — you may not be connected "
-                            "or LinkedIn requires Premium to message this person."
-                        )
-                except Exception as e:
-                    st.error(f"Failed: {e}")
+    if btn_send.button(send_label, key=f"send_li_{job_id}_{i}", use_container_width=True):
+        _send_on_linkedin(job_id, contact, edited_msg, draft_key, auto_send)
 
 
 def _render_new_contacts(sel: pd.Series, job_id: str) -> None:
