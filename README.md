@@ -13,7 +13,7 @@ Scrapes job postings from LinkedIn, Naukri, company ATS boards (Greenhouse/Lever
 - **Application auto-fill** — opens a job's application page in a visible browser and best-effort fills name/email/phone/LinkedIn/resume fields from your saved profile; never auto-submits
 - **SQLite persistence** — jobs survive across runs; re-scanning a known job never resets your status
 - **Duplicate prevention at write time** — the same role posted under multiple sources (e.g. LinkedIn + a company's own Greenhouse board) collapses to one row instead of being flagged after the fact
-- **Application tracking** — mark jobs as `new`, `saved`, `applied`, or `rejected` directly in the UI
+- **Application tracking** — mark jobs as `new`, `shortlisted`, `saved`, `applied`, or `rejected` directly in the UI
 - **Candidate profile** — store your details, resume (PDF/DOCX), multiple saved search profiles, and company boards to scan
 - **Streamlit web UI** — filterable, searchable, scorable job table with a detail view per job
 - **CLI + cron support** — headless scanning (`main.py`), a daily all-sources scan + scoring job designed for cron (`cron_scan.py`), a description-backfill utility (`backfill_descriptions.py`), a structured-JD-extraction backfill utility (`backfill_jd_extraction.py`), and a standalone scoring utility (`backfill_score_jobs.py`)
@@ -118,7 +118,7 @@ Results are saved to the database immediately. Running the same scan again is sa
 
 #### Stats row
 
-Shows live counts of **Total / New / Saved / Applied / Rejected** across all jobs in the database.
+Shows live counts of **Total / New / Shortlisted / Applied / Rejected** across all jobs in the database.
 
 #### Filters
 
@@ -237,6 +237,15 @@ python backfill_score_jobs.py            # score every job that needs it
 python backfill_score_jobs.py --top 50   # only the top 50 jobs by score
 ```
 
+### `backfill_content_hash.py` — backfill dedup hashes
+
+Populates `jobs.content_hash` for rows saved before that column existed. New jobs get one automatically at save time, so this is only needed once (or after restoring an old database). See [Deduplication](#deduplication--upsert-behavior) for what the hash is used for.
+
+```bash
+python backfill_content_hash.py            # fill in missing hashes only
+python backfill_content_hash.py --force    # recompute every row's hash
+```
+
 ### `clear_db.py` — reset tables
 
 ```bash
@@ -247,22 +256,44 @@ python clear_db.py --all          # clear both
 
 ---
 
+## Testing
+
+```bash
+pytest                      # run the suite
+ruff check .                # lint
+```
+
+The suite runs entirely offline — no network, no browser, no API key. Coverage is concentrated on the pure logic: the ATS/aggregator row mapping (`greenhouse`/`lever`/`ashby`/`jsearch`), the scan kernel in `scanner/search.py`, the shared CLI flags, DataFrame filters, database migrations and dedup ordering, the Playwright launch helper, Naukri's row parsing, and the LLM scoring/extraction/breaker logic.
+
+Two shared test helpers are worth knowing about:
+
+- `tests/conftest.py` — `isolated_db` repoints `database.DB_PATH` at a temp file (tables are created lazily, so no teardown is needed); `stub_fetch_json` stubs the HTTP call the ATS scrapers share.
+- `tests/fakes.py` — `FakePage` / `FakeElement` / `FakePlaywright` stand in for Playwright, which is enough to test scraping logic without a browser.
+
+**Not covered:** the live Playwright flows (`linkedin_playwright.py`'s scraping/login, `naukri_playwright.py`'s `search_jobs`/`login`, `apply.py`) and the Streamlit UI — those need a real session, browser, or running server. The LinkedIn scraper in particular depends on obfuscated CSS class names that only a live run can validate; use `debug_linkedin_scan.py` for that.
+
+---
+
 ## Project Structure
 
 ```
 Job_Scanner/
-├── app.py                    # Streamlit web UI (Jobs tab + Profile tab)
+├── app.py                    # Streamlit entry point — wires the sidebar to the two tabs
+├── cli_common.py             # Shared argparse flags + logging for the scripts below
 ├── main.py                   # CLI entry point (one-off scan)
 ├── cron_scan.py              # Daily all-sources scan + scoring, designed for cron
 ├── backfill_descriptions.py  # Recover missing LinkedIn descriptions, optionally score
 ├── backfill_jd_extraction.py # Backfill structured JD extraction (SCORING_MODE=structured only)
-├── backfill_score_jobs.py     # Score every job that needs it (raw or structured)
+├── backfill_score_jobs.py    # Score every job that needs it (raw or structured)
+├── backfill_content_hash.py  # Backfill jobs.content_hash for pre-existing rows
 ├── clear_db.py               # Reset jobs/referrals tables
 ├── requirements.txt
-├── .env.example               # Copy to .env — see its comments for the full option list
+├── pytest.ini / ruff.toml    # Test + lint configuration
+├── .env.example              # Copy to .env — see its comments for the full option list
 │
-├── scanner/
-│   ├── __init__.py           # Package facade — re-exports the public API below
+├── scanner/                  # The only layer that touches the network or the database
+│   ├── __init__.py           # Package facade — re-exports the public API
+│   ├── search.py             # Scan kernel: SearchCriteria, ScanResult, the per-keyword loop
 │   ├── linkedin.py           # jobspy wrapper (no login) + description backfill
 │   ├── linkedin_playwright.py  # Authenticated LinkedIn scraper, referral finder, DM sender
 │   ├── naukri_playwright.py  # Authenticated Naukri scraper
@@ -270,17 +301,38 @@ Job_Scanner/
 │   ├── lever.py              # Public Lever board API
 │   ├── ashby.py              # Public Ashby board API
 │   ├── ats_common.py         # Shared helpers for the three ATS scrapers above
+│   ├── ats_registry.py       # Maps the stored `ats` value to its fetcher
 │   ├── jsearch.py            # JSearch (RapidAPI) aggregator search
+│   ├── manual.py             # Add a single job by pasting its URL
 │   ├── browser.py            # Shared Playwright launch config (UA, stealth script, launch args)
 │   ├── apply.py              # Application form auto-fill automation
-│   ├── llm.py                # LLM calls: scoring, resume summaries, referral drafts, form-field matching
-│   ├── scoring.py            # score_unscored_jobs() — shared by cron_scan.py and backfill_descriptions.py
-│   ├── database.py           # SQLite: jobs + referrals tables — save, query, dedup, status/score updates
-│   ├── profile.py            # SQLite: candidate, resume, search_criteria, company_boards tables
+│   ├── llm/                  # All LLM calls
+│   │   ├── __init__.py       # Provider selection, circuit breaker, tracing, shared plumbing
+│   │   ├── extraction.py     # Resume summary + structured JD/resume extraction models
+│   │   ├── raw_scoring.py    # SCORING_MODE=raw — scores raw JD text
+│   │   ├── structured_scoring.py  # SCORING_MODE=structured — scores JSON against JSON
+│   │   ├── referral.py       # Referral message drafting + apply-form field matching
+│   │   └── prompts/          # Prompt text, kept out of the Python source
+│   ├── scoring.py            # score_unscored_jobs() + the structured-mode extraction helpers
+│   ├── database.py           # SQLite: jobs + referrals — save, query, dedup, status/score updates
+│   ├── profile.py            # SQLite: candidate, resume, search_criteria, company_boards
 │   ├── filters.py            # DataFrame filter helpers
-│   └── config.py             # Reads CLI defaults from .env
+│   └── config.py             # Reads CLI defaults from .env (main.py only)
 │
-├── tests/                     # pytest suite — scrapers, browser helper (mocked, no network)
+├── ui/                       # Streamlit UI, split by concern; app.py is only the wiring
+│   ├── sidebar.py            # Search settings + the per-source scan buttons
+│   ├── jobs_tab.py           # Stats row, filters, job table, row selection
+│   ├── detail_panel.py       # Selected-job modal: description, score, status editor
+│   ├── profile_tab.py        # Candidate details, resume, search profiles, company boards
+│   ├── referrals.py          # Referral contact discovery, drafting, sending
+│   ├── scoring.py            # Score button, auto-scoring after a scan, score display
+│   ├── scan_handlers.py      # Main-thread scan orchestration (progress bars, "Scan All")
+│   ├── scan_runners.py       # Per-source setup; delegates the scan loop to scanner/search.py
+│   └── constants.py          # Shared thresholds, poll intervals, log-box sizes
+│
+├── tests/                    # pytest suite — mocked, no network or browser required
+│   ├── conftest.py           # Shared fixtures (isolated_db, stub_fetch_json)
+│   └── fakes.py              # Fake Playwright page/element/browser objects
 │
 ├── data/
 │   ├── jobs.db                # SQLite database (created on first run)
@@ -310,8 +362,11 @@ All tables live in `data/jobs.db`.
 | `job_url` / `job_url_direct` | TEXT | Listing link / direct application link |
 | `description` | TEXT | Full job description |
 | `company_industry` / `company_url` | TEXT | Not populated by every source |
-| `status` | TEXT | `new` / `saved` / `applied` / `rejected` |
+| `status` | TEXT | `new` / `shortlisted` / `saved` / `applied` / `rejected` |
 | `score` / `score_reason` / `score_breakdown` | INTEGER/TEXT | Set by the LLM scorer; `score_breakdown` is a JSON blob (skills/company/remote/role) |
+| `jd_extracted` | TEXT | Structured JD JSON, populated only under `SCORING_MODE=structured` |
+| `structured_score` / `structured_score_reason` / `structured_score_breakdown` | INTEGER/TEXT | Structured-mode scores, kept in their own columns so they never overwrite the raw ones |
+| `content_hash` | TEXT | Short hash of the normalized description, used for cross-source dedup (below) |
 | `first_seen` / `last_seen` | TEXT | UTC timestamps |
 
 ### `referrals`
@@ -338,7 +393,12 @@ Multiple rows — each a company's ATS board to scan (`name`, `ats` — `greenho
 
 ## Deduplication & upsert behavior
 
-Duplicates are **prevented at write time**, not flagged after the fact. When saving a batch of jobs, each row's normalized `(title, company)` is checked against every existing job: if it matches an existing row under a *different* id, that's treated as the same role re-sighted from another source — the existing row's `last_seen` is bumped (and `job_url_direct` backfilled if it was empty), and no new row is created. This applies both against the database and within a single incoming batch, so scanning multiple sources at once can't create duplicates either.
+Duplicates are **prevented at write time**, not flagged after the fact. When saving a batch of jobs, each row is checked against existing jobs on **two independent signals** — either match means "same role, re-sighted from another source", so the existing row's `last_seen` is bumped (and `job_url_direct` backfilled if it was empty) and no new row is created:
+
+1. **`content_hash`** (checked first) — a sha256 of the normalized job description, truncated to 12 hex characters. This catches the same posting mirrored across sources even when the title or company string differs (casing, suffixes like `(Platform)`, a recruiter's rewording of the employer name). It is skipped for descriptions under 200 characters: the hash carries no company/title scoping of its own, so a near-empty or boilerplate description could otherwise collide across genuinely different postings. Real job descriptions are far longer than that floor, so in practice this only affects rows that failed to fetch a description — those fall through to signal 2.
+2. **`(title, company)`**, lowercased and normalized — the original signal, which catches the same role scraped from LinkedIn and mirrored on the company's own Greenhouse board under an identical title.
+
+Both rules apply against the database *and* within a single incoming batch, so scanning multiple sources at once can't create duplicates either. Rows saved before `content_hash` existed have it as `NULL` until they are re-seen or backfilled with `backfill_content_hash.py`.
 
 Re-scanning a job that already exists (same id) only updates `last_seen` and the scraped fields — `status` and `first_seen` are **never overwritten**, so your tracking data is safe across runs. A re-scrape that comes back with a blank field (e.g. a transient fetch failure) doesn't clobber a previously-populated value.
 
@@ -347,7 +407,7 @@ Re-scanning a job that already exists (same id) only updates `last_seen` and the
 ## Known Limitations
 
 - **Rate limiting / blocking:** LinkedIn and Naukri may throttle or block repeated rapid scans, especially via the authenticated Playwright sources. Space out scans if you run many in sequence.
-- **Selector fragility:** the authenticated LinkedIn/Naukri scrapers depend on each site's current, often-obfuscated CSS class names. A site redesign can break scraping until selectors are updated.
+- **Selector fragility:** the authenticated LinkedIn/Naukri scrapers depend on each site's current, often-obfuscated CSS class names. A site redesign can break scraping until selectors are updated. `scanner/linkedin_playwright.py` is by far the most maintenance-heavy file in the project for this reason, and it has no automated coverage — validate changes to it with a live `debug_linkedin_scan.py` run, not the test suite.
 - **Unsupported countries:** the underlying jobspy library does not recognise all countries (e.g. Kyrgyzstan) for its LinkedIn source. The scraper monkey-patches this to fall back gracefully rather than crashing.
 - **Salary data:** most postings across all sources do not include salary information; `min_amount`/`max_amount` will be null for the majority of results.
 - **Scoring/LLM features require an API key:** `CLAUDE_API_KEY` or `GEMINI_API_KEY` must be set for scoring, resume summary generation, and referral message drafting — the rest of the app works without one.
