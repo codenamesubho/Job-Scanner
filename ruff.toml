@@ -22,6 +22,8 @@ ignore = [
 "tests/*" = ["F811"]
 # The package facades re-export names they do not themselves use, by design.
 "scanner/__init__.py" = ["F401"]
+# The LinkedIn package re-exports its submodules' names as its public surface.
+"scanner/linkedin_playwright/__init__.py" = ["F401"]
 # llm/__init__.py must import submodules last (see its trailing comment), so its
 # re-exports are not at the top of the file.
 "scanner/llm/__init__.py" = ["F401", "E402"]
