@@ -67,14 +67,14 @@ def _streamlit_log_progress(log_box, progress):
     """Build (log_fn, progress_fn) callables that update st.* placeholders
     directly — only ever call this (and the callables it returns) from the
     main Streamlit script thread, never from a background worker thread."""
-    from .constants import LOG_TAIL_LINES
+    from .constants import LOG_BOX_HEIGHT_PX
 
     log_lines: list[str] = []
 
     def log_fn(msg: str) -> None:
         log_lines.append(msg)
         if log_box is not None:
-            log_box.code("\n".join(log_lines[-LOG_TAIL_LINES:]))
+            log_box.code("\n".join(log_lines), height=LOG_BOX_HEIGHT_PX)
 
     def progress_fn(frac: float, text: str) -> None:
         if progress is not None:

@@ -12,7 +12,7 @@ import time
 
 import streamlit as st
 
-from .constants import POLL_INTERVAL_S, SCAN_ALL_LOG_TAIL_LINES
+from .constants import POLL_INTERVAL_S, SCAN_ALL_LOG_BOX_HEIGHT_PX
 from .scan_runners import (
     _SCAN_SOURCES, _run_company_boards, _run_jobspy, _run_jsearch,
     _run_linkedin_login, _run_naukri, _streamlit_log_progress,
@@ -141,14 +141,14 @@ def _run_parallel_sources(keywords: str, location: str, results: int, hours: int
             for name, (pbar, lbox) in placeholders.items():
                 s = state[name]
                 pbar.progress(s["pct"], text=f"{name}: {s['text']}")
-                lbox.code("\n".join(s["log"][-SCAN_ALL_LOG_TAIL_LINES:]))
+                lbox.code("\n".join(s["log"]), height=SCAN_ALL_LOG_BOX_HEIGHT_PX)
         time.sleep(POLL_INTERVAL_S)
 
     with state_lock:
         for name, (pbar, lbox) in placeholders.items():
             s = state[name]
             pbar.progress(1.0, text=f"{name}: done")
-            lbox.code("\n".join(s["log"][-SCAN_ALL_LOG_TAIL_LINES:]))
+            lbox.code("\n".join(s["log"]), height=SCAN_ALL_LOG_BOX_HEIGHT_PX)
             if s["error"]:
                 st.error(f"{name} failed: {s['error']}")
             elif s["result"]:

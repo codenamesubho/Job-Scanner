@@ -8,9 +8,11 @@ __pycache__/
 output/*.csv
 output/*.json
 data/jobs.db
+data/jobs.db.bak-*
 data/playwright_sessions/*.json
 project_progress.md
 test_litellm_cliproxy_cache.py
+debug_linkedin_scan.py
 
 # IDE
 .idea/
