@@ -295,7 +295,13 @@ Job_Scanner/
 │   ├── __init__.py           # Package facade — re-exports the public API
 │   ├── search.py             # Scan kernel: SearchCriteria, ScanResult, the per-keyword loop
 │   ├── linkedin.py           # jobspy wrapper (no login) + description backfill
-│   ├── linkedin_playwright.py  # Authenticated LinkedIn scraper, referral finder, DM sender
+│   ├── linkedin_playwright/  # Authenticated LinkedIn scraper (split by concern)
+│   │   ├── selectors.py      # Every CSS selector + tuning constant — fix redesigns here
+│   │   ├── session.py        # Browser/session lifecycle, login, logging sink
+│   │   ├── jobs.py           # Search: scrolling, card extraction, pagination
+│   │   ├── descriptions.py   # The three description-fetch strategies
+│   │   ├── people.py         # Profile scraping, referral-contact discovery
+│   │   └── messaging.py      # Sending a LinkedIn DM
 │   ├── naukri_playwright.py  # Authenticated Naukri scraper
 │   ├── greenhouse.py         # Public Greenhouse board API
 │   ├── lever.py              # Public Lever board API
@@ -304,11 +310,14 @@ Job_Scanner/
 │   ├── ats_registry.py       # Maps the stored `ats` value to its fetcher
 │   ├── jsearch.py            # JSearch (RapidAPI) aggregator search
 │   ├── manual.py             # Add a single job by pasting its URL
-│   ├── browser.py            # Shared Playwright launch config (UA, stealth script, launch args)
+│   ├── browser.py            # Shared Playwright launch config + SessionBrowser
 │   ├── apply.py              # Application form auto-fill automation
 │   ├── llm/                  # All LLM calls
 │   │   ├── __init__.py       # Provider selection, circuit breaker, tracing, shared plumbing
 │   │   ├── extraction.py     # Resume summary + structured JD/resume extraction models
+│   │   ├── _breaker.py       # CircuitBreaker — per-provider rate-limit cooldown
+│   │   ├── _batch.py         # Shared batch driver for both scoring modes
+│   │   ├── _tracing.py       # Optional Langfuse tracing
 │   │   ├── raw_scoring.py    # SCORING_MODE=raw — scores raw JD text
 │   │   ├── structured_scoring.py  # SCORING_MODE=structured — scores JSON against JSON
 │   │   ├── referral.py       # Referral message drafting + apply-form field matching
@@ -325,7 +334,10 @@ Job_Scanner/
 │   ├── detail_panel.py       # Selected-job modal: description, score, status editor
 │   ├── profile_tab.py        # Candidate details, resume, search profiles, company boards
 │   ├── referrals.py          # Referral contact discovery, drafting, sending
-│   ├── scoring.py            # Score button, auto-scoring after a scan, score display
+│   ├── scoring/              # Score button, post-scan auto-scoring, score display
+│   ├── background.py         # BackgroundJob — thread + progress state for scans/scoring
+│   ├── models.py             # ScanRequest
+│   ├── session_keys.py       # Names of the st.session_state entries
 │   ├── scan_handlers.py      # Main-thread scan orchestration (progress bars, "Scan All")
 │   ├── scan_runners.py       # Per-source setup; delegates the scan loop to scanner/search.py
 │   └── constants.py          # Shared thresholds, poll intervals, log-box sizes
@@ -407,7 +419,7 @@ Re-scanning a job that already exists (same id) only updates `last_seen` and the
 ## Known Limitations
 
 - **Rate limiting / blocking:** LinkedIn and Naukri may throttle or block repeated rapid scans, especially via the authenticated Playwright sources. Space out scans if you run many in sequence.
-- **Selector fragility:** the authenticated LinkedIn/Naukri scrapers depend on each site's current, often-obfuscated CSS class names. A site redesign can break scraping until selectors are updated. `scanner/linkedin_playwright.py` is by far the most maintenance-heavy file in the project for this reason, and it has no automated coverage — validate changes to it with a live `debug_linkedin_scan.py` run, not the test suite.
+- **Selector fragility:** the authenticated LinkedIn/Naukri scrapers depend on each site's current, often-obfuscated CSS class names. A site redesign can break scraping until selectors are updated. This is the project's biggest maintenance cost; LinkedIn's selectors are collected in `scanner/linkedin_playwright/selectors.py` so a redesign has one file to fix. The tests cover only selector-independent logic, so validate scraper changes with a live `debug_linkedin_scan.py` run in **both** `--keyword-mode` values, not the test suite alone.
 - **Unsupported countries:** the underlying jobspy library does not recognise all countries (e.g. Kyrgyzstan) for its LinkedIn source. The scraper monkey-patches this to fall back gracefully rather than crashing.
 - **Salary data:** most postings across all sources do not include salary information; `min_amount`/`max_amount` will be null for the majority of results.
 - **Scoring/LLM features require an API key:** `CLAUDE_API_KEY` or `GEMINI_API_KEY` must be set for scoring, resume summary generation, and referral message drafting — the rest of the app works without one.
