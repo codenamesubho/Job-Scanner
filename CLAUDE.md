@@ -46,7 +46,8 @@ python backfill_score_jobs.py --top 50
 # Clear the jobs and/or referrals tables
 python clear_db.py --jobs
 ```
-
+Always add new work on a branch from main and create a PR against main.
+Use feature branches instead of worktree for development
 Dont run git commit by yourself ever, always ask user before you commit
 
 ## Testing

@@ -330,7 +330,7 @@ def get_jobs(
     if missing_structured_score:
         query += " AND structured_score IS NULL"
 
-    query += " ORDER BY COALESCE(structured_score, score, -1) DESC, first_seen DESC"
+    query += " ORDER BY COALESCE(structured_score, -1) DESC, first_seen DESC"
 
     with _connect() as conn:
         return pd.read_sql(query, conn, params=params)
