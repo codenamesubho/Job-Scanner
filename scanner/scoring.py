@@ -8,7 +8,6 @@ against it with score_jobs_structured() instead of score_jobs().
 
 import json
 import threading
-from typing import Optional
 
 from .database import (
     get_jobs, update_scores, update_structured_scores, scoreable_jobs,
@@ -111,7 +110,7 @@ def load_resume_profile(candidate: dict, log_fn) -> ResumeProfile | None:
         return None
 
 
-def score_unscored_jobs(log_fn=print, limit:Optional[int]=None) -> int:
+def score_unscored_jobs(log_fn=print, limit: int | None = None) -> int:
     """Score jobs that need it. Under SCORING_MODE=raw (default): every job
     with no score yet and a usable description, via the existing free-text
     score_jobs(). Under SCORING_MODE=structured: every job missing a

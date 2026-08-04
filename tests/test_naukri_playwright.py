@@ -1,31 +1,12 @@
 from scanner import naukri_playwright as np_module
-
-
-class _FakeEl:
-    def __init__(self, text="", attrs=None):
-        self._text = text
-        self._attrs = attrs or {}
-
-    def inner_text(self):
-        return self._text
-
-    def get_attribute(self, name):
-        return self._attrs.get(name)
-
-
-class _FakeCard:
-    def __init__(self, els: dict):
-        self._els = els
-
-    def query_selector(self, selector):
-        return self._els.get(selector)
+from tests.fakes import FakeElement, FakePage
 
 
 def test_parse_job_card_maps_fields():
-    card = _FakeCard({
-        "a.title": _FakeEl("Backend Engineer", {"href": "https://naukri.com/job/123"}),
-        "a.comp-name": _FakeEl("Acme Inc"),
-        "span.locWdth": _FakeEl("Remote"),
+    card = FakePage({
+        "a.title": FakeElement("Backend Engineer", {"href": "https://naukri.com/job/123"}),
+        "a.comp-name": FakeElement("Acme Inc"),
+        "span.locWdth": FakeElement("Remote"),
     })
 
     row = np_module._parse_job_card(card)
@@ -40,7 +21,7 @@ def test_parse_job_card_maps_fields():
 
 
 def test_parse_job_card_handles_missing_elements():
-    card = _FakeCard({})
+    card = FakePage({})
 
     row = np_module._parse_job_card(card)
 
@@ -52,9 +33,9 @@ def test_parse_job_card_handles_missing_elements():
 
 
 def test_scrape_cards_dedupes_by_job_url():
-    card_a = _FakeCard({"a.title": _FakeEl("Job A", {"href": "https://naukri.com/a"})})
-    card_b = _FakeCard({"a.title": _FakeEl("Job A dup", {"href": "https://naukri.com/a"})})
-    card_c = _FakeCard({"a.title": _FakeEl("Job C", {"href": "https://naukri.com/c"})})
+    card_a = FakePage({"a.title": FakeElement("Job A", {"href": "https://naukri.com/a"})})
+    card_b = FakePage({"a.title": FakeElement("Job A dup", {"href": "https://naukri.com/a"})})
+    card_c = FakePage({"a.title": FakeElement("Job C", {"href": "https://naukri.com/c"})})
 
     seen: set[str] = set()
     rows = np_module._scrape_cards([card_a, card_b, card_c], seen)

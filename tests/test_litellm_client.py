@@ -1,4 +1,3 @@
-import pytest
 
 from scanner import llm
 

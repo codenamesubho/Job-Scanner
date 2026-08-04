@@ -1,0 +1,28 @@
+# Deliberately permissive to start: this config was added to a codebase that had
+# never been linted. It is tuned to pass on the existing tree so that enabling it
+# does not require a tree-wide reformat in the same commit. Tighten rule-by-rule as
+# the refactor phases land — each rule below records why it is off and what it costs.
+target-version = "py310"
+line-length = 110
+
+[lint]
+select = ["E", "F", "UP", "B"]
+# "I" (import sorting) is deliberately NOT selected yet: enabling it reorders imports
+# in 26 files, which is pure churn that would bury real changes in review. Turn it on
+# in its own dedicated commit.
+ignore = [
+    "E501",  # line length: long selector strings and prompts make this noisy here
+    "E701",  # multiple statements on one line: 3 hits, all terse guard clauses
+    "B008",  # function call in default arg: argparse/Path defaults rely on this
+    "B028",  # warnings.warn without stacklevel: 5 hits, all user-facing scrape warnings
+    "B905",  # zip() without strict=: 6 hits, all over known-equal-length sequences
+]
+
+[lint.per-file-ignores]
+# Tests bind fixtures and fakes that a linter reads as unused or shadowing.
+"tests/*" = ["F811"]
+# The package facades re-export names they do not themselves use, by design.
+"scanner/__init__.py" = ["F401"]
+# llm/__init__.py must import submodules last (see its trailing comment), so its
+# re-exports are not at the top of the file.
+"scanner/llm/__init__.py" = ["F401", "E402"]

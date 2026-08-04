@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from . import (
     BATCH_SIZE, EmptyScoringResultError, _provider, _raw_completion_text,
-    observe, scoring_breaker_status,
+    observe,
 )
 from .extraction import ResumeProfile
 from ._prompt_loader import load_prompt_file

@@ -308,8 +308,8 @@ def get_jobs(
     unscored_only: bool = False,
     missing_structured_score: bool = False,
 ) -> pd.DataFrame:
-    """Return jobs ordered by structured score desc (falling back to raw
-    score, nulls last), then newest first.
+    """Return jobs ordered by structured score desc, falling back to the raw
+    score, then nulls last, then newest first.
 
     `unscored_only` and `missing_structured_score` are independent filters
     (score IS NULL vs. structured_score IS NULL) — structured scoring must
@@ -330,7 +330,11 @@ def get_jobs(
     if missing_structured_score:
         query += " AND structured_score IS NULL"
 
-    query += " ORDER BY COALESCE(structured_score, -1) DESC, first_seen DESC"
+    # COALESCE falls back to the raw `score` before -1 so that jobs which have
+    # been raw-scored but not structured-scored still sort by how good they are.
+    # Without the `score` term they all collapse to -1 and tie, which silently
+    # turned every "--top N by score" backfill into "newest N".
+    query += " ORDER BY COALESCE(structured_score, score, -1) DESC, first_seen DESC"
 
     with _connect() as conn:
         return pd.read_sql(query, conn, params=params)
