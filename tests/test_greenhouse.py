@@ -22,8 +22,8 @@ _FIXTURE = {
 }
 
 
-def test_fetch_jobs_maps_rows(monkeypatch):
-    monkeypatch.setattr(greenhouse, "fetch_json", lambda url, params: _FIXTURE)
+def test_fetch_jobs_maps_rows(stub_fetch_json):
+    stub_fetch_json(greenhouse, _FIXTURE)
 
     df = greenhouse.fetch_jobs("acme", "Acme Inc")
 
@@ -46,8 +46,8 @@ def test_fetch_jobs_maps_rows(monkeypatch):
     assert onsite_row["description"] == ""
 
 
-def test_fetch_jobs_empty(monkeypatch):
-    monkeypatch.setattr(greenhouse, "fetch_json", lambda url, params: {"jobs": []})
+def test_fetch_jobs_empty(stub_fetch_json):
+    stub_fetch_json(greenhouse, {"jobs": []})
 
     df = greenhouse.fetch_jobs("acme", "Acme Inc")
 

@@ -20,4 +20,7 @@ def filter_by_remote_flag(jobs: pd.DataFrame) -> pd.DataFrame:
     column), as opposed to guessing from the location text."""
     if jobs.empty:
         return jobs
-    return jobs[jobs["is_remote"] == True]
+    # `== 1` rather than truthiness: is_remote is stored as INTEGER (0/1), so
+    # `jobs[jobs["is_remote"]]` would raise on the int64 column. Comparing to 1
+    # also matches a bool True from sources that set it that way, and excludes NaN.
+    return jobs[jobs["is_remote"] == 1]

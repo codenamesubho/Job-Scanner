@@ -10,8 +10,6 @@ import requests
 
 def _patched_get_location(self, metadata_card):
     """Patched version of LinkedIn._get_location that skips unrecognised countries."""
-    from typing import Optional
-    from bs4 import Tag
 
     location = Location(country=Country.from_string(self.country))
     if metadata_card is not None:

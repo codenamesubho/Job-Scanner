@@ -25,15 +25,11 @@ from .llm import (
     score_jobs_structured, JobRequirements, ResumeProfile,
 )
 from .scoring import score_unscored_jobs, extract_missing_job_requirements, load_resume_profile
-
-# Registry of company-ATS-board scrapers, keyed by the `ats` value stored in
-# the company_boards table (see profile.save_company_board). Shared by
-# app.py's "Company Boards" scan button and cron_scan.py.
-ATS_FETCHERS = {
-    "greenhouse": greenhouse_fetch_jobs,
-    "lever":      lever_fetch_jobs,
-    "ashby":      ashby_fetch_jobs,
-}
+from .ats_registry import ATS_FETCHERS
+from .search import (
+    SearchCriteria, ScanResult, run_keyword_scan, run_company_board_scan,
+    prefixed_logger,
+)
 
 
 def linkedin_login(email: str, password: str) -> bool:

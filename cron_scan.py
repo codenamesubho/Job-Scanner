@@ -21,28 +21,15 @@ CAPTCHA flow unattended.
 
 import argparse
 import os
-from datetime import datetime
 
-import pandas as pd
-
+from cli_common import add_search_args, criteria_from_args, log as _log
 from scanner import (
-    search_jobs, save_jobs, get_criteria,
-    linkedin_playwright_search, naukri_search, jsearch_search_jobs,
-    get_company_boards, ATS_FETCHERS,
-    score_unscored_jobs,
+    ScanResult, SearchCriteria, get_criteria, jsearch_search_jobs,
+    linkedin_playwright_search, naukri_search, prefixed_logger,
+    run_company_board_scan, run_keyword_scan, score_unscored_jobs, search_jobs,
 )
-from scanner.filters import filter_by_keywords
 from scanner.linkedin_playwright import SESSION_FILE as LINKEDIN_SESSION_FILE
 from scanner.naukri_playwright import SESSION_FILE as NAUKRI_SESSION_FILE
-
-
-def _log(msg: str) -> None:
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{ts}] {msg}", flush=True)
-
-
-def _split_keywords(raw: str) -> list[str]:
-    return [k.strip() for k in raw.split(",") if k.strip()]
 
 
 def parse_args():
@@ -50,135 +37,58 @@ def parse_args():
     # search_criteria row, or profile._CRITERIA_DEFAULTS if none was ever saved.
     crit = get_criteria()
     parser = argparse.ArgumentParser(description="Daily job scan across every enabled source")
-    parser.add_argument("--keywords", default=crit["keywords"],
-                         help="Comma-separated keywords (default: saved search criteria)")
-    parser.add_argument("--location", default=crit["location"],
-                         help="Job location (default: saved search criteria)")
-    parser.add_argument("--results", type=int, default=crit["results"],
-                         help="Max results per keyword (default: saved search criteria)")
-    parser.add_argument("--hours", type=int, default=crit["hours"],
-                         help="Max age of postings in hours (default: saved search criteria)")
+    add_search_args(parser, crit)
     return parser.parse_args()
 
 
-def _run_keyword_scan(source_name: str, scan_fn, keywords: str, location: str,
-                       results: int, hours: int, **kwargs) -> tuple[int, int]:
-    """Run scan_fn once per comma-separated keyword, concatenate, save. One bad
-    keyword doesn't abort the source — same tolerance as app.py's scan loops."""
-    kw_list = _split_keywords(keywords)
-    all_dfs: list[pd.DataFrame] = []
-    for i, kw in enumerate(kw_list, start=1):
-        _log(f"  [{source_name}] [{i}/{len(kw_list)}] Searching '{kw}' in '{location}'…")
-        try:
-            df = scan_fn(kw, location, results_wanted=results, hours_old=hours, **kwargs)
-            if not df.empty:
-                all_dfs.append(df)
-                _log(f"  [{source_name}] [{i}/{len(kw_list)}] '{kw}': {len(df)} job(s) found")
-            else:
-                _log(f"  [{source_name}] [{i}/{len(kw_list)}] '{kw}': no jobs found")
-        except Exception as e:
-            _log(f"  [{source_name}] [{i}/{len(kw_list)}] '{kw}' FAILED: {e}")
+def _scan(source_name: str, scan_fn, criteria: SearchCriteria) -> ScanResult:
+    """Run one keyword-based source, tagging every log line with its name.
 
-    if not all_dfs:
-        _log(f"  [{source_name}] No jobs found for any keyword.")
-        return 0, 0
-
-    combined = pd.concat(all_dfs, ignore_index=True)
-    new_count = save_jobs(combined)
-    _log(f"  [{source_name}] Done — {len(combined)} found, {new_count} new.")
-    return len(combined), new_count
-
-
-def _run_company_boards(keywords: str, location: str, results: int, hours: int) -> tuple[int, int]:
-    boards = get_company_boards()
-    if not boards:
-        _log("  [Company Boards] Skipped — no company boards saved (add some in the Profile tab).")
-        return 0, 0
-
-    all_dfs: list[pd.DataFrame] = []
-    for i, board in enumerate(boards, start=1):
-        fetch_fn = ATS_FETCHERS.get(board["ats"])
-        if not fetch_fn:
-            _log(f"  [Company Boards] [{i}/{len(boards)}] {board['name']}: unknown ATS '{board['ats']}', skipped")
-            continue
-        _log(f"  [Company Boards] [{i}/{len(boards)}] Scanning {board['name']} ({board['ats']})…")
-        try:
-            df = fetch_fn(board["token"], board["name"])
-            if not df.empty:
-                all_dfs.append(df)
-                _log(f"  [Company Boards] [{i}/{len(boards)}] {board['name']}: {len(df)} job(s) found")
-            else:
-                _log(f"  [Company Boards] [{i}/{len(boards)}] {board['name']}: no jobs found")
-        except Exception as e:
-            _log(f"  [Company Boards] [{i}/{len(boards)}] {board['name']} FAILED: {e}")
-
-    if not all_dfs:
-        _log("  [Company Boards] No jobs found across saved company boards.")
-        return 0, 0
-
-    combined = pd.concat(all_dfs, ignore_index=True)
-    kw_list = _split_keywords(keywords)
-    if kw_list:
-        before = len(combined)
-        combined = filter_by_keywords(combined, kw_list)
-        _log(f"  [Company Boards] Keyword filter: {before} → {len(combined)} job(s)")
-
-    new_count = save_jobs(combined)
-    _log(f"  [Company Boards] Done — {len(combined)} found, {new_count} new.")
-    return len(combined), new_count
+    The cron job interleaves all sources into a single stdout stream, so it needs
+    the prefix; the Streamlit UI gives each source its own log box and does not.
+    That is the only difference between the two callers of run_keyword_scan().
+    """
+    _log(f"[{source_name}]")
+    return run_keyword_scan(scan_fn, criteria, prefixed_logger(_log, source_name))
 
 
 def main() -> None:
     args = parse_args()
-    _log(f"Starting daily scan — keywords='{args.keywords}' location='{args.location}' "
-         f"results={args.results} hours={args.hours}")
+    criteria = criteria_from_args(args)
+    _log(f"Starting daily scan — keywords='{criteria.keywords}' location='{criteria.location}' "
+         f"results={criteria.results} hours={criteria.hours}")
 
-    total_found = 0
-    total_new = 0
+    total = ScanResult()
+    total += _scan("LinkedIn (jobspy)", search_jobs, criteria)
 
-    _log("[LinkedIn (jobspy)]")
-    found, new = _run_keyword_scan("LinkedIn (jobspy)", search_jobs, args.keywords,
-                                    args.location, args.results, args.hours)
-    total_found += found
-    total_new += new
-
-    _log("[LinkedIn (login)]")
+    # Login-based sources only run off an already-saved session: a cron job can't
+    # complete an interactive visible-browser/CAPTCHA login unattended.
     if LINKEDIN_SESSION_FILE.exists():
-        found, new = _run_keyword_scan("LinkedIn (login)", linkedin_playwright_search,
-                                        args.keywords, args.location, args.results, args.hours)
-        total_found += found
-        total_new += new
+        total += _scan("LinkedIn (login)", linkedin_playwright_search, criteria)
     else:
+        _log("[LinkedIn (login)]")
         _log("  [LinkedIn (login)] Skipped — no saved session. Log in once via the Streamlit app first.")
 
-    _log("[Naukri]")
     if NAUKRI_SESSION_FILE.exists():
-        found, new = _run_keyword_scan("Naukri", naukri_search, args.keywords,
-                                        args.location, args.results, args.hours)
-        total_found += found
-        total_new += new
+        total += _scan("Naukri", naukri_search, criteria)
     else:
+        _log("[Naukri]")
         _log("  [Naukri] Skipped — no saved session. Log in once via the Streamlit app first.")
 
     _log("[Company Boards]")
-    found, new = _run_company_boards(args.keywords, args.location, args.results, args.hours)
-    total_found += found
-    total_new += new
+    total += run_company_board_scan(criteria, prefixed_logger(_log, "Company Boards"))
 
-    _log("[JSearch]")
     if os.getenv("JSEARCH_API_KEY"):
-        found, new = _run_keyword_scan("JSearch", jsearch_search_jobs, args.keywords,
-                                        args.location, args.results, args.hours)
-        total_found += found
-        total_new += new
+        total += _scan("JSearch", jsearch_search_jobs, criteria)
     else:
+        _log("[JSearch]")
         _log("  [JSearch] Skipped — set JSEARCH_API_KEY in .env.")
 
-    _log(f"Scan complete — {total_found} found, {total_new} new across all sources.")
+    _log(f"Scan complete — {total.found} found, {total.new} new across all sources.")
 
     scored = score_unscored_jobs(log_fn=_log)
 
-    _log(f"Done. {total_new} new job(s) saved, {scored} scored.")
+    _log(f"Done. {total.new} new job(s) saved, {scored} scored.")
 
 
 if __name__ == "__main__":

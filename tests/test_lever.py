@@ -27,8 +27,8 @@ _FIXTURE = [
 ]
 
 
-def test_fetch_jobs_maps_rows(monkeypatch):
-    monkeypatch.setattr(lever, "fetch_json", lambda url, params: _FIXTURE)
+def test_fetch_jobs_maps_rows(stub_fetch_json):
+    stub_fetch_json(lever, _FIXTURE)
 
     df = lever.fetch_jobs("acme", "Acme Inc")
 

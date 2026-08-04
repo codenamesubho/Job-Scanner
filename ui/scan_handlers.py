@@ -12,6 +12,8 @@ import time
 
 import streamlit as st
 
+from scanner import SearchCriteria
+
 from .constants import POLL_INTERVAL_S, SCAN_ALL_LOG_BOX_HEIGHT_PX
 from .scan_runners import (
     _SCAN_SOURCES, _run_company_boards, _run_jobspy, _run_jsearch,
@@ -20,12 +22,13 @@ from .scan_runners import (
 from .scoring import _auto_score_new
 
 
-def _run_individual(name: str, runner, keywords: str, location: str, results: int, hours: int) -> None:
+def _run_individual(name: str, runner, criteria: SearchCriteria) -> None:
     progress = st.progress(0, text=f"Starting {name} scan…")
     log_box  = st.empty()
     log_fn, progress_fn = _streamlit_log_progress(log_box, progress)
     try:
-        found, new_count = runner(keywords, location, results, hours, log_fn, progress_fn)
+        result = runner(criteria, log_fn, progress_fn)
+        found, new_count = result.found, result.new
         progress.empty()
         if found == 0 and new_count == 0:
             st.info(f"{name}: nothing found (see log above if this is unexpected).")
@@ -39,23 +42,23 @@ def _run_individual(name: str, runner, keywords: str, location: str, results: in
 
 
 def handle_jobspy_scan(keywords: str, location: str, results: int, hours: int) -> None:
-    _run_individual("LinkedIn (jobspy)", _run_jobspy, keywords, location, results, hours)
+    _run_individual("LinkedIn (jobspy)", _run_jobspy, SearchCriteria(keywords, location, results, hours))
 
 
 def handle_linkedin_scan(keywords: str, location: str, results: int, hours: int) -> None:
-    _run_individual("LinkedIn (login)", _run_linkedin_login, keywords, location, results, hours)
+    _run_individual("LinkedIn (login)", _run_linkedin_login, SearchCriteria(keywords, location, results, hours))
 
 
 def handle_naukri_scan(keywords: str, location: str, results: int, hours: int) -> None:
-    _run_individual("Naukri", _run_naukri, keywords, location, results, hours)
+    _run_individual("Naukri", _run_naukri, SearchCriteria(keywords, location, results, hours))
 
 
 def handle_company_boards_scan(keywords: str, location: str, results: int, hours: int) -> None:
-    _run_individual("Company Boards", _run_company_boards, keywords, location, results, hours)
+    _run_individual("Company Boards", _run_company_boards, SearchCriteria(keywords, location, results, hours))
 
 
 def handle_jsearch_scan(keywords: str, location: str, results: int, hours: int) -> None:
-    _run_individual("JSearch", _run_jsearch, keywords, location, results, hours)
+    _run_individual("JSearch", _run_jsearch, SearchCriteria(keywords, location, results, hours))
 
 
 _PARALLEL_SOURCES = [(name, runner) for name, runner in _SCAN_SOURCES if name != "LinkedIn (login)"]
@@ -70,8 +73,9 @@ def _run_linkedin_login_alone(keywords: str, location: str, results: int, hours:
     li_log_box  = st.empty()
     li_log_fn, li_progress_fn = _streamlit_log_progress(li_log_box, li_progress)
     try:
-        found, new_count = _run_linkedin_login(keywords, location, results, hours,
-                                                 li_log_fn, li_progress_fn)
+        result = _run_linkedin_login(SearchCriteria(keywords, location, results, hours),
+                                      li_log_fn, li_progress_fn)
+        found, new_count = result.found, result.new
         li_progress.empty()
         if found == 0 and new_count == 0:
             st.info("LinkedIn (login): nothing found (see log above if this is unexpected).")
@@ -110,12 +114,12 @@ def _run_parallel_sources(keywords: str, location: str, results: int, hours: int
 
     def _worker(name, runner):
         try:
-            found, new_count = runner(keywords, location, results, hours,
-                                       _make_log_fn(name), _make_progress_fn(name))
+            result = runner(SearchCriteria(keywords, location, results, hours),
+                             _make_log_fn(name), _make_progress_fn(name))
             with state_lock:
                 state[name]["done"]   = True
                 state[name]["pct"]    = 1.0
-                state[name]["result"] = (found, new_count)
+                state[name]["result"] = (result.found, result.new)
         except Exception as e:
             with state_lock:
                 state[name]["done"]  = True
