@@ -152,8 +152,10 @@ def add_job_by_url(url: str) -> tuple[bool, str]:
     """Fetch and save a single job posting from a pasted URL.
 
     Tries known ATS/LinkedIn patterns first (structured, reliable), then
-    falls back to a generic page-text scrape. Returns (success, message)
-    for the caller to display.
+    falls back to a generic page-text scrape. A genuinely new row is saved
+    with status "shortlisted" rather than the scan-sourced default "new" —
+    a job someone bothered to paste a URL for is already past triage.
+    Returns (success, message) for the caller to display.
     """
     url = url.strip()
     if not url:
@@ -176,7 +178,7 @@ def add_job_by_url(url: str) -> tuple[bool, str]:
         return False, ("Couldn't fetch a description from that URL — the page may "
                         "require login or block automated requests.")
 
-    new_count = save_jobs(pd.DataFrame([row]))
+    new_count = save_jobs(pd.DataFrame([row]), default_status="shortlisted")
     company = row.get("company") or "unknown company"
     if new_count:
         return True, f'Added "{row["title"] or url}" at {company}.'

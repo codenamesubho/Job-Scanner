@@ -13,12 +13,13 @@ from .scan_handlers import (
 
 def _render_stats() -> None:
     stats = get_stats()
-    m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("Total",    stats["total"])
-    m2.metric("New",      stats["new"])
-    m3.metric("Saved",    stats["saved"])
-    m4.metric("Applied",  stats["applied"])
-    m5.metric("Rejected", stats["rejected"])
+    m1, m2, m3, m4, m5, m6 = st.columns(6)
+    m1.metric("Total",       stats["total"])
+    m2.metric("New",         stats["new"])
+    m3.metric("Shortlisted", stats["shortlisted"])
+    m4.metric("Saved",       stats["saved"])
+    m5.metric("Applied",     stats["applied"])
+    m6.metric("Rejected",    stats["rejected"])
 
 
 def _company_type_options() -> list[str]:

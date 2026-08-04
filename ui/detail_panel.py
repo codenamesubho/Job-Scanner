@@ -32,7 +32,7 @@ def _render_detail_panel(sel: pd.Series, job_id: str) -> None:
     direct_url = sel.get("job_url_direct", "") or ""
     apply_url  = direct_url or job_url
 
-    apply_col, listing_col, applied_col = st.columns([2, 2, 1])
+    apply_col, listing_col, shortlist_col, applied_col = st.columns([2, 2, 1, 1])
 
     if job_url:
         listing_col.link_button("View Listing ↗", job_url, use_container_width=True)
@@ -61,6 +61,11 @@ def _render_detail_panel(sel: pd.Series, job_id: str) -> None:
             if log_lines:
                 with st.expander("Apply log", expanded=False):
                     st.code("\n".join(log_lines))
+
+    if shortlist_col.button("⭐ Shortlist", key=f"shortlist_{job_id}", use_container_width=True):
+        update_status(job_id, "shortlisted")
+        st.toast("Status → 'shortlisted'.")
+        st.rerun()
 
     if applied_col.button("✅ Mark Applied", key=f"mark_applied_{job_id}", use_container_width=True):
         update_status(job_id, "applied")
