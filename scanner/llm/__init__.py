@@ -185,6 +185,35 @@ class _RawLiteLLMClient:
         return self._completion_fn(**kwargs)
 
 
+_MD_FENCE_RE = re.compile(r"^\s*```(?:json)?\s*\n?(.*?)\n?```\s*$", re.DOTALL)
+
+
+def _strip_markdown_fence(text):
+    """Strip a single leading/trailing ```json ... ``` (or bare ```) fence
+    around an otherwise-whole response. Claude models reflexively wrap JSON
+    output in a markdown code fence even under instructor's Mode.JSON_SCHEMA,
+    which expects clean JSON and doesn't tolerate that on its first parse
+    attempt — every structured-output call was paying for a guaranteed extra
+    "Correct your JSON ONLY RESPONSE" reask round-trip until the fence is
+    stripped before instructor ever sees the content. Only matches when the
+    ENTIRE string is one fenced block (anchored, no re.MULTILINE) so a fence
+    embedded inside a JSON string value can't be mistaken for the wrapper."""
+    if not isinstance(text, str):
+        return text
+    match = _MD_FENCE_RE.match(text)
+    return match.group(1) if match else text
+
+
+def _unfence_completion(completion_fn, *args, **kwargs):
+    response = completion_fn(*args, **kwargs)
+    for choice in getattr(response, "choices", None) or []:
+        message = getattr(choice, "message", None)
+        content = getattr(message, "content", None)
+        if isinstance(content, str):
+            message.content = _strip_markdown_fence(content)
+    return response
+
+
 def _make_client(provider: str | None = None, is_instructor: bool = False):
     """Return a client for the given LLM provider, bound to that provider's
     api_base/api_key via litellm. Supported providers: "claude" (Anthropic,
@@ -214,7 +243,11 @@ def _make_client(provider: str | None = None, is_instructor: bool = False):
         # OPENAI-registered option — takes a plain response_model instead of
         # requiring Iterable[...], matching our existing single-object
         # response models (BatchScoreResult, StructuredBatchScoreResult, etc.).
-        return instructor.from_litellm(completion_fn, mode=instructor.Mode.JSON_SCHEMA)
+        # Wrapped in _unfence_completion so a markdown-fenced response (see
+        # _strip_markdown_fence) doesn't cost a guaranteed extra reask round
+        # trip on every structured-output call.
+        unfenced_completion_fn = functools.partial(_unfence_completion, completion_fn)
+        return instructor.from_litellm(unfenced_completion_fn, mode=instructor.Mode.JSON_SCHEMA)
     return _RawLiteLLMClient(completion_fn)
 
 
