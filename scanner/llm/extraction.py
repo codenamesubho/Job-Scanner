@@ -126,8 +126,11 @@ class ResumeProfile(BaseModel):
                     "tackled — skip whichever of the three isn't described rather than padding "
                     "with generic filler.",
     )
-    awards: list[dict[str,str]] = Field(default_factory=list)
-    project: list[dict[str, str]] = Field(default_factory=list)
+    awards: list[str] = Field(default_factory=list, description="Awards listed on the resume")
+    project: list[str] = Field(
+        default_factory=list,
+        description="Summarise the projects but ensure to pick key skills from it"
+    )
 
     @model_validator(mode="before")
     @classmethod
