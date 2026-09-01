@@ -47,6 +47,18 @@ class JobRequirements(BaseModel):
     )
 
 
+class SkillYears(BaseModel):
+    """One entry of ResumeProfile.skill_years. A plain dict[str, float] here
+    would generate a JSON schema with additionalProperties set to a schema
+    (arbitrary keys) rather than false — Anthropic's structured-output mode
+    only accepts additionalProperties: false, so free-form dict types must
+    be modeled as a list of objects instead."""
+    model_config = ConfigDict(extra="forbid")
+
+    skill: str
+    years: float
+
+
 class ResumeProfile(BaseModel):
     """Structured extraction of a candidate's resume text (see
     extract_resume_profile) — feeds structured scoring and, for the
@@ -54,8 +66,9 @@ class ResumeProfile(BaseModel):
     # extra="forbid": see JobRequirements above — required for the JSON
     # schema to carry additionalProperties: false, which Anthropic's
     # structured-output mode requires. The model_validator(mode="before")
-    # below strips known alternate-shape keys before validation runs, so
-    # this only rejects genuinely unrecognized keys the model invents.
+    # below normalizes known alternate shapes and drops any other stray
+    # key before validation runs, so this never actually raises on the
+    # model's own output — it only guarantees the outbound schema shape.
     model_config = ConfigDict(extra="forbid")
 
     # apply.py form-fill slots — field names match scanner/apply.py's _SLOTS
@@ -82,8 +95,8 @@ class ResumeProfile(BaseModel):
     years_exp: float | None = Field(default=None)
     seniority_band: str | None = Field(default=None)
     skills: list[str] = Field(default_factory=list)
-    skill_years: dict[str, float] = Field(
-        default_factory=dict,
+    skill_years: list[SkillYears] = Field(
+        default_factory=list,
         description="Approximate total years of hands-on experience per skill/technology named "
                     "in `skills`, computed from the dated work experience entries where that "
                     "skill was actually used (e.g. a skill used in a role from 2019-2022 and "
@@ -92,7 +105,7 @@ class ResumeProfile(BaseModel):
                     "use the same skill should not be double-counted. Only include a skill here "
                     "if the resume's dated work history actually shows it being used; a skill "
                     "listed only in a bare skills list with no traceable dated usage can still "
-                    "go in `skills` but should be omitted from this mapping.",
+                    "go in `skills` but should be omitted from this list. One entry per skill.",
     )
     current_title: str | None = Field(
         default=None,
@@ -136,10 +149,18 @@ class ResumeProfile(BaseModel):
         schema — e.g. a "contact": {...} object instead of top-level
         email/phone/linkedin, or a "work_experience": [{company, title,
         work_summary}, ...] array instead of the flat `work_summary` list.
-        Without this, `extra="ignore"` silently drops those mismatched keys
-        and the fields just come back null/empty — not a validation error,
-        so it's easy to mistake for the model failing to find the data at
-        all. Normalize the common alternate shapes here before validation.
+        Without this, a mismatched key would just come back null/empty —
+        not a validation error, so it's easy to mistake for the model
+        failing to find the data at all. Normalize the common alternate
+        shapes here before validation.
+
+        model_config uses extra="forbid" (required so the JSON schema
+        carries additionalProperties: false for Anthropic's structured-
+        output mode — see SkillYears above), so any other unrecognized key
+        the model invents (e.g. a stray "skill_years_notes" commentary
+        field) is dropped at the end of this validator rather than left to
+        raise — the previous extra="ignore" leniency for genuinely unknown
+        keys, just applied explicitly instead of implicitly.
         """
         if not isinstance(data, dict):
             return data
@@ -210,6 +231,24 @@ class ResumeProfile(BaseModel):
                 data["first_name"] = parts[0]
             if not data.get("last_name") and len(parts) > 1:
                 data["last_name"] = " ".join(parts[1:])
+
+        # skill_years is schema'd as list[SkillYears] (see SkillYears above)
+        # rather than dict[str, float], but a prompted (non-schema-enforced)
+        # generation can still fall back to the more natural mapping shape —
+        # convert it rather than losing the data to validation failure.
+        skill_years = data.get("skill_years")
+        if isinstance(skill_years, dict):
+            data["skill_years"] = [
+                {"skill": skill, "years": years} for skill, years in skill_years.items()
+            ]
+
+        # extra="forbid" requires the JSON schema to omit additionalProperties
+        # as a schema (see SkillYears above), which in turn means any other
+        # unrecognized top-level key the model invents (e.g. a stray
+        # "skill_years_notes" commentary field) must be dropped here rather
+        # than left to raise a validation error.
+        known_fields = set(cls.model_fields)
+        data = {k: v for k, v in data.items() if k in known_fields}
 
         return data
 
