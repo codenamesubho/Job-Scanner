@@ -10,6 +10,9 @@ output/*.json
 data/jobs.db
 data/jobs.db.bak-*
 data/playwright_sessions/*.json
+data/autofill_context.md
+data/tmp/
+data/autofill_runs/
 project_progress.md
 test_litellm_cliproxy_cache.py
 debug_linkedin_scan.py

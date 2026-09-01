@@ -24,6 +24,11 @@ PROFILE_LOAD = "_profile_load"
 # scoring is running — its presence is what turns the Score button into Cancel.
 SCORE_JOB = "_score_job"
 
+# In-flight Apply runs (a dict of job_id -> ui.background.BackgroundJob) — one
+# entry per job currently being applied to via Autofill-Job-Application, keyed
+# so applying to job A doesn't disturb an in-flight run for job B.
+APPLY_JOBS = "_apply_jobs"
+
 # Profile tab editing state.
 EDITING_PROFILE = "_editing_profile"
 LAST_RESUME_KEY = "_last_resume_key"

@@ -10,6 +10,7 @@ DEFAULT_MIN_SCORE    = 65
 # bars/log placeholders while a scan or scoring worker thread is running.
 POLL_INTERVAL_S         = 0.4
 SCORE_BUTTON_POLL_S     = 0.5  # _render_score_button ticks via st.rerun() instead of a blocking loop
+APPLY_BUTTON_POLL_S     = 1.0  # _render_apply_button ticks via st.rerun() instead of a blocking loop
 
 # Log placeholders show the full log (never truncated) inside a fixed-height,
 # scrollable st.code box, so earlier lines stay reachable by scrolling instead

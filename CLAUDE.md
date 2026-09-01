@@ -10,6 +10,10 @@ All commands assume the virtualenv is active (`source venv/bin/activate`). The v
 # Install / sync dependencies
 pip install -r requirements.txt
 
+# One-time: enable the "Apply" button (drives the separate Autofill-Job-Application
+# project — see scanner/autofill_bridge.py). Not in requirements.txt; not on PyPI.
+pip install -e /path/to/Autofill-Job-Application
+
 # Run the Streamlit UI
 streamlit run app.py                        # opens http://localhost:8501
 
@@ -84,7 +88,8 @@ The `scanner/` package is the only layer that touches the database or the networ
 - **`jsearch.py`** — RapidAPI aggregator (`JSEARCH_API_KEY`) covering LinkedIn/Indeed/Glassdoor/ZipRecruiter through one keyed HTTP endpoint. Reads its API key directly from the environment at call time (not routed through `config.py`, which is CLI-only).
 
 **Automation:**
-- **`apply.py`** — "open + prefill application form" automation: launches a visible browser, navigates to a job's application URL, and best-effort fills common form fields (name, email, phone, LinkedIn, resume) from the saved candidate profile via keyword matching, falling back to an LLM match (`llm.match_form_fields`) when the heuristic finds nothing. Never clicks any submit-type control — the browser is always left open for manual review/submission. Reuses the logged-in LinkedIn session from `linkedin_playwright.SESSION_FILE`.
+- **`apply.py`** — the original "open + prefill application form" automation: launches a visible browser, navigates to a job's application URL, and best-effort fills common form fields (name, email, phone, LinkedIn, resume) from the saved candidate profile via keyword matching, falling back to an LLM match (`llm.match_form_fields`) when the heuristic finds nothing. Never clicks any submit-type control — the browser is always left open for manual review/submission. Reuses the logged-in LinkedIn session from `linkedin_playwright.SESSION_FILE`. **Deprecated — no longer wired into the UI** (superseded by `autofill_bridge.py`); left in the repo unused rather than deleted.
+- **`autofill_bridge.py`** — the current Apply engine, driving the separate [Autofill-Job-Application](https://github.com/codenamesubho/Autofill-Job-Application) project instead of `apply.py`'s keyword heuristic. That project's `autofill-fill` agent (LLM + `browser-use`) discovers *every* question on a real ATS form — not just the handful `apply.py` knew how to match — and answers each one from a markdown candidate-profile doc, with its own code-level guardrails (a restricted tool registry + a CDP-level submit blocker) that make it structurally incapable of clicking submit, matching `apply.py`'s "never auto-submit" rule. Not a `requirements.txt` dependency (not published to PyPI) — install it into this venv separately: `pip install -e /path/to/Autofill-Job-Application`. `autofill_bridge.run_apply(job_url, log_fn, cancel_event)` shells out to its `autofill-fill` console script (its own async `browser-use` agent loop, so subprocess rather than an in-process import — same reasoning `apply.py` uses for running Playwright's sync API on a dedicated thread), builds the required markdown candidate doc lazily at `data/autofill_context.md` from `profile.get_candidate()` (`build_context_markdown()` — only overwrites on an explicit `force=True`, since Autofill-Job-Application treats that file as hand-editable "source of truth"), and derives `AUTOFILL_LLM_*` env vars from this project's own `CLAUDE_API_KEY`/`CLAUDE_MODEL` (`resolve_llm_env()`) so nothing new needs configuring by default — mapped through `AUTOFILL_LLM_PROVIDER=litellm` + `AUTOFILL_LLM_BASE_URL=http://localhost:8317`, not `AUTOFILL_LLM_PROVIDER=anthropic`, since `CLAUDE_API_KEY` here is only valid against this project's local CLIProxyAPI bridge, not api.anthropic.com directly (see `scanner/llm/__init__.py`'s `_PROVIDER_CONFIG`). Set `AUTOFILL_LLM_API_KEY` explicitly in `.env` to override the derived config (e.g. to point Autofill at a different provider/model than the scorer uses).
 - **`browser.py`** — shared Playwright launch configuration (user agent, stealth init script, launch args, and a `launch_stealth_browser()` helper) used by `apply.py`, `linkedin_playwright.py`, and `naukri_playwright.py` so the three don't each redefine the same boilerplate.
 
 **Scoring/LLM:**
@@ -122,6 +127,8 @@ The `scanner/` package is the only layer that touches the database or the networ
 ### Database
 
 Single file `data/jobs.db`. All tables are created lazily on first `_connect()` call. `profile._connect()` calls `database._connect()` and then creates its own tables on top — both modules share the same file path via `DB_PATH`.
+
+`autofill_bridge.py` writes non-DB artifacts alongside it, all resolved against `database.DB_PATH`'s directory rather than a hardcoded `data/` so they follow `DB_PATH` if it's ever rebound (e.g. in tests): `data/autofill_context.md` (the candidate profile doc, hand-editable — see above), `data/tmp/` (per-run resume/URL scratch files), and `data/autofill_runs/<job-slug>/` (each Apply run's `autofill-fill` output, including the `fills/*.json` this project parses for its success/escalated/failed summary).
 
 ### Deduplication
 

@@ -8,6 +8,7 @@ from scanner import (
     get_latest_resume, save_candidate, save_company_board, save_criteria,
     save_resume,
 )
+from scanner.autofill_bridge import build_context_markdown, context_path
 
 from .constants import HOURS_OPTIONS
 
@@ -36,6 +37,15 @@ def _render_candidate_section() -> None:
     if save_clicked:
         save_candidate(name, email, phone, linkedin, curr_title, years_exp, summary)
         st.success("Candidate details saved.")
+
+    ctx_path = context_path()
+    st.caption(
+        f"Apply flow profile: `{ctx_path}` "
+        + ("(exists — hand-edited copies are kept)" if ctx_path.exists() else "(created on first Apply click)")
+    )
+    if st.button("↻ Regenerate apply profile from candidate data", key="regen_autofill_context"):
+        build_context_markdown(get_candidate(), force=True)
+        st.success(f"Regenerated {ctx_path} from the candidate details above.")
 
     if gen_clicked:
         save_candidate(name, email, phone, linkedin, curr_title, years_exp, summary)
