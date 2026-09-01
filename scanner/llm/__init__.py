@@ -232,22 +232,34 @@ def _make_client(provider: str | None = None, is_instructor: bool = False):
         litellm.completion, api_base=cfg["api_base"], api_key=_api_key(provider),
     )
     if is_instructor:
-        # instructor.from_litellm() always tags the client as Provider.OPENAI
-        # internally (litellm's own interface is OpenAI-shaped regardless of
-        # the actual backend model) — Mode.TOOLS isn't a registered
-        # (provider, mode) pair for Provider.OPENAI in instructor's registry
-        # (that's reserved for providers with a non-parallel tool-call API,
-        # e.g. native Anthropic), so it fails at call time. Mode.JSON_SCHEMA
-        # is registered for Provider.OPENAI, maps to a real structured-output
-        # mechanism, and — unlike Mode.PARALLEL_TOOLS, the other
-        # OPENAI-registered option — takes a plain response_model instead of
+        # Mode.JSON_SCHEMA (Anthropic's strict structured-output/response_format
+        # mode) turned out to be unreliable for our schemas: it rejected
+        # ResumeProfile outright with "Schema is too complex" (Anthropic's
+        # strict-schema validator has tighter limits than the size of this
+        # schema alone would suggest — many optional/anyOf fields plus a
+        # nested list[SkillYears] pushed it over), and separately failed
+        # parsing on responses the model prefixed with prose ("Here is the
+        # structured..." before the JSON) since strict-schema mode expects
+        # the entire message content to be raw JSON with nothing else.
+        # Mode.TOOLS (instructor's own default for from_litellm) instead maps
+        # onto ordinary OpenAI-style function/tool-calling, which litellm
+        # translates to Anthropic's native (long-stable, much more tolerant)
+        # tool-use API — arguments come back as structured tool-call JSON
+        # rather than free-text message content, so neither failure mode
+        # above is possible. Confirmed via direct reproduction: the exact
+        # same ResumeProfile schema + prompt that failed under JSON_SCHEMA
+        # succeeded first-try under TOOLS. Registered for Provider.OPENAI
+        # (instructor.from_litellm() always tags the client as Provider.OPENAI
+        # internally, regardless of the actual backend model) via
+        # OPENAI_COMPAT_PROVIDERS, and takes a plain response_model instead of
         # requiring Iterable[...], matching our existing single-object
         # response models (BatchScoreResult, StructuredBatchScoreResult, etc.).
-        # Wrapped in _unfence_completion so a markdown-fenced response (see
-        # _strip_markdown_fence) doesn't cost a guaranteed extra reask round
-        # trip on every structured-output call.
+        # Still wrapped in _unfence_completion — harmless under TOOLS (message
+        # content is typically empty/None when the model responds via a tool
+        # call) and keeps the raw non-instructor call sites' behavior
+        # unaffected either way.
         unfenced_completion_fn = functools.partial(_unfence_completion, completion_fn)
-        return instructor.from_litellm(unfenced_completion_fn, mode=instructor.Mode.JSON_SCHEMA)
+        return instructor.from_litellm(unfenced_completion_fn, mode=instructor.Mode.TOOLS)
     return _RawLiteLLMClient(completion_fn)
 
 
@@ -262,17 +274,19 @@ class _WarmupModel(BaseModel):
 def _warm_up_litellm(provider: str) -> None:
     """One-time, single-threaded instructor.from_litellm(...) call per
     provider to force instructor's mode_registry to fully populate the
-    (Provider.OPENAI, Mode.JSON_SCHEMA) handler registration before
-    concurrent batch calls start. Confirmed by direct reproduction: firing
-    ~20 concurrent first-time instructor.create(mode=Mode.JSON_SCHEMA, ...)
-    calls from a cold process raises "RegistryError: Mode Mode.JSON_SCHEMA
-    is not registered for provider Provider.OPENAI" on nearly all of
-    them — this is a registration race the first time that (provider, mode)
-    handler is looked up, not (as first suspected) a litellm lazy-import
-    race; a raw, non-instructor warmup call (is_instructor=False) does NOT
-    exercise this path and does NOT fix it — the warmup call itself must go
-    through instructor with response_model set, matching the real call
-    shape. mock_response means this costs no network call or tokens."""
+    (Provider.OPENAI, Mode.TOOLS) handler registration before concurrent
+    batch calls start. Confirmed by direct reproduction (originally against
+    Mode.JSON_SCHEMA, before the switch to Mode.TOOLS — see _make_client;
+    the same registry-lookup mechanism applies regardless of mode): firing
+    ~20 concurrent first-time instructor.create(...) calls from a cold
+    process raises "RegistryError: Mode <mode> is not registered for
+    provider Provider.OPENAI" on nearly all of them — this is a
+    registration race the first time that (provider, mode) handler is
+    looked up, not (as first suspected) a litellm lazy-import race; a raw,
+    non-instructor warmup call (is_instructor=False) does NOT exercise this
+    path and does NOT fix it — the warmup call itself must go through
+    instructor with response_model set, matching the real call shape.
+    mock_response means this costs no network call or tokens."""
     if provider in _warmed_up_providers:
         return
     with _warmup_lock:
