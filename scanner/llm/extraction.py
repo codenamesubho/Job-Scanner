@@ -47,7 +47,7 @@ class ResumeProfile(BaseModel):
     """Structured extraction of a candidate's resume text (see
     extract_resume_profile) — feeds structured scoring and, for the
     fill-in-application fields, a future apply.py form-fill data source."""
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="allow")
 
     # apply.py form-fill slots — field names match scanner/apply.py's _SLOTS
     full_name: str | None = Field(
@@ -117,6 +117,8 @@ class ResumeProfile(BaseModel):
                     "tackled — skip whichever of the three isn't described rather than padding "
                     "with generic filler.",
     )
+    awards: list[dict[str,str]] = Field(default_factory=list)
+    project: list[dict[str, str]] = Field(default_factory=list)
 
     @model_validator(mode="before")
     @classmethod
