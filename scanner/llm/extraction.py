@@ -14,7 +14,11 @@ class JobRequirements(BaseModel):
     extract_job_requirements) — the only place raw JD text is read end to
     end. Powers structured scoring (score_jobs_structured) so later scoring
     calls never re-send raw text."""
-    model_config = ConfigDict(extra="ignore")
+    # extra="forbid" (not "ignore") so the generated JSON schema carries an
+    # explicit additionalProperties: false — Anthropic's structured-output
+    # mode (instructor.Mode.JSON_SCHEMA) rejects any object schema without
+    # it, failing the whole call with a BadRequestError on every retry.
+    model_config = ConfigDict(extra="forbid")
 
     must_haves: list[str] = Field(default_factory=list)
     nice_to_haves: list[str] = Field(default_factory=list)
@@ -47,7 +51,12 @@ class ResumeProfile(BaseModel):
     """Structured extraction of a candidate's resume text (see
     extract_resume_profile) — feeds structured scoring and, for the
     fill-in-application fields, a future apply.py form-fill data source."""
-    model_config = ConfigDict(extra="ignore")
+    # extra="forbid": see JobRequirements above — required for the JSON
+    # schema to carry additionalProperties: false, which Anthropic's
+    # structured-output mode requires. The model_validator(mode="before")
+    # below strips known alternate-shape keys before validation runs, so
+    # this only rejects genuinely unrecognized keys the model invents.
+    model_config = ConfigDict(extra="forbid")
 
     # apply.py form-fill slots — field names match scanner/apply.py's _SLOTS
     full_name: str | None = Field(
