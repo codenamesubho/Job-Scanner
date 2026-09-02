@@ -51,7 +51,7 @@ python backfill_score_jobs.py --top 50
 python clear_db.py --jobs
 ```
 Always add new work on a branch from main and create a PR against main.
-Use feature branches instead of worktree for development
+Do not create a git worktree for this. Work directly in the current checkout — `git checkout -b <branch>` there — rather than in a separate worktree directory.
 Dont run git commit by yourself ever, always ask user before you commit
 
 ## Testing
