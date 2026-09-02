@@ -69,3 +69,28 @@ def test_match_ats_api_returns_none_for_unrecognized_requests():
 
 def test_match_ats_api_returns_none_on_empty_list():
     assert manual._match_ats_api([], "https://acme.com/careers/job") is None
+
+
+def test_clean_html_to_markdown_strips_chrome_and_keeps_structure():
+    html = """
+    <html><body>
+      <nav>Home | Careers | About</nav>
+      <header>Acme Corp</header>
+      <script>trackPageview();</script>
+      <main>
+        <h2>Staff Engineer</h2>
+        <p>We need a <b>strong</b> backend engineer.</p>
+        <ul><li>Python</li><li>SQL</li></ul>
+      </main>
+      <footer>© 2026 Acme. All rights reserved.</footer>
+    </body></html>
+    """
+
+    md = manual._clean_html_to_markdown(html)
+
+    assert "Home | Careers | About" not in md
+    assert "trackPageview" not in md
+    assert "All rights reserved" not in md
+    assert "## Staff Engineer" in md
+    assert "**strong**" in md
+    assert "Python" in md and "SQL" in md

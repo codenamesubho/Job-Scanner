@@ -22,9 +22,28 @@ import re
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
+from markdownify import markdownify
 
 from .ats_common import fetch_json, html_to_text, build_job_row
 from .database import save_jobs
+
+# Tags that carry no job-description content on a generic page (nav/chrome/
+# scripting) — stripped before the remaining HTML is converted to Markdown.
+_NOISE_TAGS = ["script", "style", "noscript", "nav", "header", "footer", "form", "svg", "iframe", "button"]
+
+
+def _clean_html_to_markdown(html: str) -> str:
+    """Strip page chrome (nav/header/footer/scripts) from raw page HTML and
+    convert what's left to Markdown, rather than flattening everything to
+    one plain-text blob. Keeps headings and bold survive as `#`/`**text**`
+    instead of vanishing into the surrounding word soup — the same
+    structure a real job description relies on to separate e.g.
+    "Requirements" from "Nice to have"."""
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup.find_all(_NOISE_TAGS):
+        tag.decompose()
+    md = markdownify(str(soup), heading_style="ATX", strip=["img"])
+    return re.sub(r"\n{3,}", "\n\n", md).strip()
 
 # Canonical hosted-board URLs — one pattern per ATS platform, matched
 # directly against the pasted URL with no browser needed.
@@ -157,7 +176,7 @@ def _from_generic(url: str) -> dict | None:
         return None
     soup        = BeautifulSoup(resp.text, "html.parser")
     title       = soup.title.get_text(strip=True) if soup.title else ""
-    description = html_to_text(resp.text)
+    description = _clean_html_to_markdown(resp.text)
     if len(description) < 50:
         return None
     job_id = f"manual-{hashlib.md5(url.encode()).hexdigest()[:12]}"
@@ -200,9 +219,11 @@ def _sniff_and_match(url: str) -> dict | None:
     (_match_ats_api) — this is what catches a job embedded on a company's
     own domain regardless of the embed style, without needing a new rule
     per company/style. If nothing matches a known ATS, fall back to the
-    rendered page's own visible text — still an improvement over a raw
-    HTTP GET for a client-rendered (JS-only) page, since that text reflects
-    what a real visitor sees rather than an empty page shell.
+    rendered page's own HTML, cleaned and converted to Markdown
+    (_clean_html_to_markdown) — still an improvement over a raw HTTP GET for
+    a client-rendered (JS-only) page, since it reflects what a real visitor
+    sees rather than an empty page shell, with headings/bold intact rather
+    than flattened into one run-on paragraph.
     Returns None (never raises) on any Playwright failure, so callers can
     fall through to the plain-HTTP _from_generic()."""
     from playwright.sync_api import sync_playwright
@@ -222,12 +243,13 @@ def _sniff_and_match(url: str) -> dict | None:
                 browser.close()
                 return row
             title = page.title()
-            text = page.inner_text("body")
+            html = page.content()
             browser.close()
     except Exception:
         return None
 
-    if len(text) < 50:
+    description = _clean_html_to_markdown(html)
+    if len(description) < 50:
         return None
     job_id = f"manual-{hashlib.md5(url.encode()).hexdigest()[:12]}"
     return build_job_row(
@@ -240,7 +262,7 @@ def _sniff_and_match(url: str) -> dict | None:
         location="",
         date_posted=None,
         is_remote=False,
-        description=text,
+        description=description,
     )
 
 

@@ -3,6 +3,8 @@
 HTML from the description, and builds the same row shape for the jobs table.
 """
 
+from html import unescape
+
 import requests
 from bs4 import BeautifulSoup
 
@@ -16,7 +18,12 @@ def fetch_json(url: str, params: dict, timeout: int = 30):
 def html_to_text(html: str) -> str:
     if not html:
         return ""
-    return BeautifulSoup(html, "html.parser").get_text(" ", strip=True)
+    # Greenhouse's `content` field comes back HTML-escaped inside the JSON
+    # string itself (e.g. "&lt;div&gt;...&lt;/div&gt;") rather than as real
+    # markup — unescape first so the parser sees actual tags to strip,
+    # instead of leaving literal "<div>"-looking text in the output.
+    # A no-op for sources (Lever/Ashby) whose HTML isn't double-encoded.
+    return BeautifulSoup(unescape(html), "html.parser").get_text(" ", strip=True)
 
 
 def build_job_row(
